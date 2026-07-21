@@ -113,7 +113,7 @@ jobs:
           trap cleanup EXIT
 
           ssh-keygen -q -t ed25519 -N '' -f "$key_dir/id_ed25519"
-          docker pull "$IMAGE"
+          docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
           docker run -d \
             --name "$container_name" \
             -e PUBLIC_KEY="$(cat "$key_dir/id_ed25519.pub")" \
