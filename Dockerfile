@@ -1,4 +1,4 @@
-FROM runpod/pytorch:1.0.7-cu1281-torch271-ubuntu2204
+FROM pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime@sha256:7db0e1bf4b1ac274ea09cf6358ab516f8a5c7d3d0e02311bed445f7e236a5d80
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -9,49 +9,31 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        build-essential \
         ca-certificates \
+        cron \
         curl \
         git \
         iproute2 \
         jq \
+        openssh-server \
         procps \
-        python3.11 \
-        python3.11-dev \
-        python3.11-venv \
         tmux \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3.11 -c 'import sys; assert sys.version_info >= (3, 11), sys.version' \
-    && python3.11 -m venv /opt/agora-venv \
-    && /opt/agora-venv/bin/python -m pip install --upgrade \
+RUN python -c 'import sys, torch; assert sys.version_info[:2] == (3, 11), sys.version; assert torch.__version__.startswith("2.7."), torch.__version__' \
+    && ln -s /opt/conda /opt/agora-venv \
+    && python -m pip install --upgrade \
         pip==25.3 \
         "setuptools<81.0" \
         wheel \
         hatchling \
         editables
 
-RUN git clone --depth 1 https://github.com/PluralisResearch/agora /opt/agora-source \
-    && cd /opt/agora-source \
-    && /opt/agora-venv/bin/python -m pip install \
-        filelock \
-        fsspec \
-        jinja2 \
-        networkx \
-        "numpy>=1.17,<2.4" \
-        pillow \
-        sympy \
-        triton==3.3.0 \
-        typing-extensions \
-    && /opt/agora-venv/bin/python -m pip install \
-        torch==2.7.0 \
-        torchvision==0.22.0 \
-        torchaudio==2.7.0 \
-        --no-deps \
-        --index-url https://download.pytorch.org/whl/cu128 \
-    && /opt/agora-venv/bin/python -m pip install --no-deps nvidia-cusparselt-cu12==0.6.3 \
-    && /opt/agora-venv/bin/python -m pip install \
+RUN /opt/agora-venv/bin/python -m pip install \
         PyYAML \
         prometheus_client \
+        "numpy>=1.17,<2.4" \
         scipy \
         prefetch_generator \
         msgpack \
@@ -78,8 +60,17 @@ RUN git clone --depth 1 https://github.com/PluralisResearch/agora /opt/agora-sou
         pySmartDL \
     && /opt/agora-venv/bin/python -m pip install --no-build-isolation --no-deps \
         "hivemind @ git+https://github.com/learning-at-home/hivemind.git@4d5c41495be082490ea44cce4e9dd58f9926bb4e" \
-    && /opt/agora-venv/bin/python -m pip install --no-build-isolation --no-deps -e ./agora_server \
-    && /opt/agora-venv/bin/python -m pip install --no-build-isolation --no-deps -e ./agora \
-    && /opt/agora-venv/bin/python -c 'import torch, hivemind, agora, agora_server; assert torch.__version__.startswith("2.7."), torch.__version__; print(f"ready torch={torch.__version__}")'
+    && /opt/agora-venv/bin/python -c 'import torch, hivemind; assert torch.__version__.startswith("2.7."), torch.__version__; print(f"ready torch={torch.__version__}")'
+
+COPY start.sh /start.sh
+
+RUN chmod 755 /start.sh \
+    && mkdir -p /run/sshd /root/.ssh \
+    && chmod 700 /root/.ssh \
+    && rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub
 
 WORKDIR /workspace
+
+EXPOSE 22 49200
+
+CMD ["/start.sh"]

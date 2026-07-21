@@ -2,11 +2,17 @@ name: Publish training image
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - Dockerfile
+      - start.sh
+      - .github/workflows/publish-image.yml
   push:
     branches:
       - main
     paths:
       - Dockerfile
+      - start.sh
       - .github/workflows/publish-image.yml
 
 permissions:
@@ -61,6 +67,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -81,7 +88,53 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Smoke published image
+        env:
+          IMAGE: ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          key_dir="$(mktemp -d)"
+          container_name="agora-training-image-smoke"
+          cleanup() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              docker logs "$container_name" || true
+            fi
+            docker rm -f "$container_name" >/dev/null 2>&1 || true
+            rm -rf "$key_dir"
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          ssh-keygen -q -t ed25519 -N '' -f "$key_dir/id_ed25519"
+          docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
+          docker run -d \
+            --name "$container_name" \
+            -e PUBLIC_KEY="$(cat "$key_dir/id_ed25519.pub")" \
+            -p 127.0.0.1:2222:22 \
+            "$IMAGE"
+
+          for _ in $(seq 1 30); do
+            if ssh -i "$key_dir/id_ed25519" -p 2222 \
+              -o BatchMode=yes \
+              -o ConnectTimeout=2 \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              root@127.0.0.1 true 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          ssh -i "$key_dir/id_ed25519" -p 2222 \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            root@127.0.0.1 \
+            'set -eu; /opt/agora-venv/bin/python -c '\''import sys, torch, hivemind; assert sys.version_info[:2] == (3, 11); assert torch.__version__.startswith("2.7.")'\''; command -v git curl jq tmux ss crontab; pgrep -x sshd; pgrep -x cron'
