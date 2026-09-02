@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agora/machine-sentinel-command/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["commandId", "action", "scope", "authorityEpoch", "issuedAt", "expiresAt", "arguments"],
+  "properties": {
+    "commandId": {"$ref": "#/$defs/identifier"},
+    "action": {"enum": ["prepare_setup", "start_training", "stop_training", "cancel_training", "repair_heartbeat", "apply_configuration"]},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reservationId", "slotGeneration", "machineId", "bootId", "setupRevision"],
+      "properties": {
+        "reservationId": {"$ref": "#/$defs/identifier"},
+        "slotGeneration": {"type": "integer", "minimum": 1},
+        "machineId": {"$ref": "#/$defs/identifier"},
+        "bootId": {"$ref": "#/$defs/identifier"},
+        "setupRevision": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "authorityEpoch": {"type": "integer", "minimum": 1},
+    "issuedAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "arguments": {
+      "oneOf": [
+        {"$ref": "#/$defs/prepareSetup"}, {"$ref": "#/$defs/startTraining"},
+        {"$ref": "#/$defs/stopTraining"}, {"$ref": "#/$defs/cancelTraining"},
+        {"$ref": "#/$defs/repairHeartbeat"}, {"$ref": "#/$defs/applyConfiguration"}
+      ]
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"action": {"const": "prepare_setup"}}}, "then": {"properties": {"arguments": {"$ref": "#/$defs/prepareSetup"}}}},
+    {"if": {"properties": {"action": {"const": "start_training"}}}, "then": {"properties": {"arguments": {"$ref": "#/$defs/startTraining"}}}},
+    {"if": {"properties": {"action": {"const": "stop_training"}}}, "then": {"properties": {"arguments": {"$ref": "#/$defs/stopTraining"}}}},
+    {"if": {"properties": {"action": {"const": "cancel_training"}}}, "then": {"properties": {"arguments": {"$ref": "#/$defs/cancelTraining"}}}},
+    {"if": {"properties": {"action": {"const": "repair_heartbeat"}}}, "then": {"properties": {"arguments": {"$ref": "#/$defs/repairHeartbeat"}}}},
+    {"if": {"properties": {"action": {"const": "apply_configuration"}}}, "then": {"properties": {"arguments": {"$ref": "#/$defs/applyConfiguration"}}}}
+  ],
+  "$defs": {
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$"},
+    "prepareSetup": {"type": "object", "additionalProperties": false, "required": ["setupProfileId", "setupRevision"], "properties": {"setupProfileId": {"$ref": "#/$defs/identifier"}, "setupRevision": {"$ref": "#/$defs/identifier"}}},
+    "startTraining": {"type": "object", "additionalProperties": false, "required": ["trainingRunId", "trainingPlanId", "configurationRevision", "announcePort"], "properties": {"trainingRunId": {"$ref": "#/$defs/identifier"}, "trainingPlanId": {"$ref": "#/$defs/identifier"}, "configurationRevision": {"$ref": "#/$defs/identifier"}, "announcePort": {"type": "integer", "minimum": 1, "maximum": 65535}}},
+    "stopTraining": {"type": "object", "additionalProperties": false, "required": ["trainingRunId", "graceSeconds", "reasonCode", "approvalReceiptId"], "properties": {"trainingRunId": {"$ref": "#/$defs/identifier"}, "graceSeconds": {"type": "integer", "minimum": 0, "maximum": 600}, "reasonCode": {"$ref": "#/$defs/reasonCode"}, "approvalReceiptId": {"$ref": "#/$defs/identifier"}}},
+    "cancelTraining": {"type": "object", "additionalProperties": false, "required": ["trainingRunId", "reasonCode", "approvalReceiptId"], "properties": {"trainingRunId": {"$ref": "#/$defs/identifier"}, "reasonCode": {"$ref": "#/$defs/reasonCode"}, "approvalReceiptId": {"$ref": "#/$defs/identifier"}}},
+    "repairHeartbeat": {"type": "object", "additionalProperties": false, "required": ["trainingRunId", "watchdogRevision"], "properties": {"trainingRunId": {"$ref": "#/$defs/identifier"}, "watchdogRevision": {"$ref": "#/$defs/identifier"}}},
+    "applyConfiguration": {"type": "object", "additionalProperties": false, "required": ["configurationId", "fromRevision", "toRevision", "approvalReceiptId", "settings"], "properties": {"configurationId": {"$ref": "#/$defs/identifier"}, "fromRevision": {"$ref": "#/$defs/identifier"}, "toRevision": {"$ref": "#/$defs/identifier"}, "approvalReceiptId": {"$ref": "#/$defs/identifier"}, "settings": {"type": "object", "additionalProperties": false, "minProperties": 1, "properties": {"announcePort": {"type": "integer", "minimum": 1, "maximum": 65535}, "nodeType": {"enum": ["head", "body", "tail"]}}}}},
+    "reasonCode": {"enum": ["operator_requested", "maintenance", "superseded"]}
+  }
+}

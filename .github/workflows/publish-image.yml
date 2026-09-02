@@ -6,6 +6,8 @@ on:
     paths:
       - Dockerfile
       - start.sh
+      - machine-sentinel/**
+      - tests/**
       - .github/workflows/publish-image.yml
   push:
     branches:
@@ -13,6 +15,8 @@ on:
     paths:
       - Dockerfile
       - start.sh
+      - machine-sentinel/**
+      - tests/**
       - .github/workflows/publish-image.yml
 
 permissions:
@@ -138,4 +142,7 @@ jobs:
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             root@127.0.0.1 \
-            'set -eu; /opt/agora-venv/bin/python -c '\''import sys, torch, pithos, agora_server, agora; assert sys.version_info[:2] == (3, 13); assert torch.__version__.startswith("2.11.")'\''; command -v git curl jq tmux ss crontab; pgrep -x sshd; pgrep -x cron'
+            'set -eu; /opt/agora-venv/bin/python -c '\''import sys, torch, pithos, agora_server, agora; assert sys.version_info[:2] == (3, 13); assert torch.__version__.startswith("2.11.")'\''; command -v git curl jq tmux ss crontab; test -x /opt/agora-machine-sentinel/start-machine-sentinel.sh; test ! -e /workspace/.agora/machine-sentinel/state.json; pgrep -x sshd; pgrep -x cron'
+
+      - name: Smoke Machine Sentinel protocol
+        run: bash tests/smoke-machine-sentinel.sh
