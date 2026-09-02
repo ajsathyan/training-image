@@ -12,7 +12,9 @@ The published image is:
 ghcr.io/ajsathyan/training-image:latest
 ```
 
-The image preinstalls Python 3.11, tmux/jq/network tooling, PyTorch 2.7 CUDA
-runtime bindings, Hivemind, and Agora Python dependencies into
-`/opt/agora-venv`. Per-machine setup still writes secrets only on the RunPod pod
-and still installs/starts the tmux watchdog at setup time.
+The image wraps `ghcr.io/pluralisresearch/agora-test:latest` with the SSH,
+cron, tmux, jq, and network/process tooling needed by the RunPod control plane.
+Its Python 3.13 and PyTorch 2.11 runtime, including the staged Pithos, Agora
+Server, and Agora packages, is available at `/opt/agora-venv`. Per-machine setup
+still writes secrets only on the RunPod pod and installs/starts the tmux
+watchdog at setup time.

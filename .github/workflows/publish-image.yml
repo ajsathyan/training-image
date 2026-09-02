@@ -91,6 +91,7 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           load: ${{ github.event_name == 'pull_request' }}
           platforms: linux/amd64
+          pull: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
@@ -137,4 +138,4 @@ jobs:
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             root@127.0.0.1 \
-            'set -eu; /opt/agora-venv/bin/python -c '\''import sys, torch, hivemind; assert sys.version_info[:2] == (3, 11); assert torch.__version__.startswith("2.7.")'\''; command -v git curl jq tmux ss crontab; pgrep -x sshd; pgrep -x cron'
+            'set -eu; /opt/agora-venv/bin/python -c '\''import sys, torch, pithos, agora_server, agora; assert sys.version_info[:2] == (3, 13); assert torch.__version__.startswith("2.11.")'\''; command -v git curl jq tmux ss crontab; pgrep -x sshd; pgrep -x cron'
