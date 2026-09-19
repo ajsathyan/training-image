@@ -33,7 +33,10 @@ class RuntimeExporterTests(unittest.TestCase):
         actual = {
             path.relative_to(output).as_posix()
             for path in output.rglob("*")
-            if path.is_file() and path.name != "manifest.json"
+            if path.is_file()
+            and path.name != "manifest.json"
+            and "__pycache__" not in path.parts
+            and path.suffix != ".pyc"
         }
         self.assertEqual(actual, inventory)
         for entry in manifest["files"]:
