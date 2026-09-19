@@ -144,6 +144,17 @@ configured_ready="$(date +%s)"
 
 ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   set -Eeuo pipefail
+  trap '\''rc=$?; failed_line=$LINENO; failed_command=$BASH_COMMAND; set +e; \
+    printf "configured smoke failed at line %s: %s\n" "$failed_line" "$failed_command" >&2; \
+    jq -c "{status,training,optional,assignmentTransition,runtimeTrainingSource}" \
+      /workspace/agora-run/bootstrap-receipt.json >&2; \
+    tmux list-sessions -F "session=#{session_name} panes=#{session_panes}" >&2; \
+    ss -ltnp | grep -E "(:7777|:22)[[:space:]]" >&2; \
+    pgrep -af "px0|refresh_inspection|machine_sentinel" >&2; \
+    tail -n 40 /var/log/agora-image-bootstrap.log \
+      /workspace/agora-run/logs/px0.log \
+      /workspace/agora-run/logs/machine-sentinel.log >&2; \
+    exit "$rc"'\'' ERR
   root=/workspace/agora-run
   test "$(cat /run/agora-image-bootstrap.status)" = 0
   jq -e '\''
@@ -167,6 +178,18 @@ ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   test ! -e /run/agora-inspection/agora.env
   test ! -e /run/agora-inspection/hf-token
   ! find /run/agora-inspection -type l -print -quit | grep -q .
+  # Bootstrap launches the inspection watcher and px0 asynchronously. Wait for
+  # their exact postconditions instead of racing the first scheduler tick.
+  for _ in $(seq 1 50); do
+    if tmux has-session -t agora_sentinel 2>/dev/null \
+      && tmux has-session -t agora_px0 2>/dev/null \
+      && tmux has-session -t agora_inspection 2>/dev/null \
+      && pgrep -x px0 >/dev/null \
+      && ss -ltn | grep -Eq '\''127\.0\.0\.1:7777[[:space:]]'\''; then
+      break
+    fi
+    sleep 0.2
+  done
   test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_sentinel)" = 1
   test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_px0)" = 1
   test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_inspection)" = 1
