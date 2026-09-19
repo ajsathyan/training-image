@@ -57,6 +57,29 @@ def _load_runtime_modules():
     return assets, remote_assets
 
 
+def _assert_no_owned_training_processes(root: Path, _decision: Any) -> None:
+    from machine_sentinel.process_contract import (  # type: ignore
+        assignment_owned_process_discovery_shell,
+    )
+
+    discovery = assignment_owned_process_discovery_shell(
+        training_source_root=str(TRAINING_SOURCE)
+    )
+    script = f"""set -Eeuo pipefail
+ROOT={shlex.quote(str(root))}
+assignment_fail() {{ printf 'assignment-fence: %s\\n' "$1" >&2; exit 76; }}
+{discovery}
+owned="$(assignment_owned_server_inventory)"
+[ -z "$owned" ] || {{ printf 'assignment-fence: owned Agora process is still running\\n' >&2; exit 76; }}
+"""
+    subprocess.run(
+        ["bash", "-c", script],
+        check=True,
+        timeout=30,
+        stdout=subprocess.DEVNULL,
+    )
+
+
 def _config(path: Path) -> tuple[dict[str, Any] | None, str]:
     if not path.exists():
         return None, ""
@@ -1039,7 +1062,13 @@ def main() -> int:
         assets, remote_assets = _load_runtime_modules()
         root.mkdir(parents=True, exist_ok=True)
         _source, commit = _verify_baked_training_source()
-        with assignment_transition(root, normalized) as transition:
+        with assignment_transition(
+            root,
+            normalized,
+            owned_process_guard=lambda decision: _assert_no_owned_training_processes(
+                root, decision
+            ),
+        ) as transition:
             preserved_ready = (
                 transition.kind == "stage"
                 and transition.idempotent

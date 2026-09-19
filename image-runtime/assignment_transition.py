@@ -11,7 +11,7 @@ import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 
 SCHEMA_VERSION = 1
@@ -287,7 +287,10 @@ def _transition_decision(
 
 @contextlib.contextmanager
 def assignment_transition(
-    root: Path, config: dict[str, Any]
+    root: Path,
+    config: dict[str, Any],
+    *,
+    owned_process_guard: Callable[[AssignmentTransition], None] | None = None,
 ) -> Iterator[AssignmentTransition]:
     """Hold the canonical CAS lock through materialization; commit manifest last."""
     root.mkdir(parents=True, exist_ok=True)
@@ -295,6 +298,11 @@ def assignment_transition(
         current = _read_manifest(root / "assignment.json")
         decision = _transition_decision(config, current)
         decision.root = root
+        if owned_process_guard is not None and decision.target_state in {
+            "fenced",
+            "staged",
+        }:
+            owned_process_guard(decision)
         try:
             yield decision
             if not decision._committed:

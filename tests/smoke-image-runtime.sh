@@ -171,6 +171,44 @@ root = pathlib.Path("/opt/agora-source").resolve()
 for module in (pithos, agora_server, agora):
     pathlib.Path(module.__file__).resolve().relative_to(root)
 PY
+  # The image CAS must reject an exact-root orphan process while staging, even
+  # when no tmux session represents it. The source file is restored before any
+  # repair check, and the fixture makes no network or GPU request.
+  server_path=/opt/agora-source/agora/src/agora/run_server.py
+  cp -p "$server_path" /tmp/run_server.py.image-smoke-backup
+  cat > "$server_path" <<'\''PY'\''
+import time
+while True:
+    time.sleep(1)
+PY
+  (
+    cd /opt/agora-source
+    /opt/agora-venv/bin/python "$server_path" > /tmp/image-smoke-orphan.log 2>&1 &
+    echo $! > "$root/orphan-owned-process.pid"
+  )
+  orphan_pid="$(cat "$root/orphan-owned-process.pid")"
+  for _ in $(seq 1 20); do
+    if kill -0 "$orphan_pid" 2>/dev/null; then break; fi
+    sleep 0.1
+  done
+  kill -0 "$orphan_pid"
+  mv /tmp/run_server.py.image-smoke-backup "$server_path"
+  assignment_before="$(sha256sum "$root/assignment.json" | awk '\''{print $1}'\'')"
+  set +e
+  /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
+    > /tmp/image-smoke-orphan-bootstrap.log 2>&1
+  orphan_bootstrap_rc=$?
+  set -e
+  test "$orphan_bootstrap_rc" = 70
+  grep -Fq "owned Agora process is still running" /tmp/image-smoke-orphan-bootstrap.log
+  test "$(sha256sum "$root/assignment.json" | awk '\''{print $1}'\'')" = "$assignment_before"
+  kill "$orphan_pid"
+  wait "$orphan_pid" 2>/dev/null || true
+  rm -f "$root/orphan-owned-process.pid"
+  /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
+    > /tmp/image-smoke-orphan-retry.log 2>&1
+  jq -e '\''.status == "ready" and .assignmentTransition.state == "staged"'\'' \
+    "$root/bootstrap-receipt.json" >/dev/null
   # Exercise the installed supervisor's exact outdated-client repair trigger
   # without joining Agora or touching a GPU.
   root=/workspace/agora-run
@@ -357,6 +395,22 @@ ssh "${ssh_options[@]}" -p "$training_port" root@127.0.0.1 '
   ! tmux has-session -t agora_sentinel 2>/dev/null
   ! tmux has-session -t agora_px0 2>/dev/null
   grep -Fq "attempt=1 exit=17" "$root/progress.log"
+  cp -p "$root/controller-input/machine-config.json" /tmp/machine-config.ready-backup.json
+  jq --slurpfile current "$root/assignment.json" \
+    '\''.startTraining = false |
+      .assignmentTransition = {kind:"stage",allowAbsent:false,expectedManifest:$current[0]}'\'' \
+    /tmp/machine-config.ready-backup.json > "$root/controller-input/.machine-config.stage-replay.json"
+  chmod 600 "$root/controller-input/.machine-config.stage-replay.json"
+  mv "$root/controller-input/.machine-config.stage-replay.json" "$root/controller-input/machine-config.json"
+  /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
+    > /tmp/image-smoke-ready-stage-replay.log 2>&1
+  jq -e '\''.status == "ready" and
+    .assignmentTransition.kind == "stage" and
+    .assignmentTransition.state == "ready" and
+    .assignmentTransition.idempotent == true and
+    .training.status == "already_started"'\'' "$root/bootstrap-receipt.json" >/dev/null
+  test "$(ps -eo pid=,args= | awk '\''$2 == "/opt/agora-venv/bin/python" && $3 == "agora_cli.py" {print $1; exit}'\'')" = "$third_pid"
+  mv /tmp/machine-config.ready-backup.json "$root/controller-input/machine-config.json"
 '
 training_identity_hash="$(sha256sum "$training_state/private_gpu0.key" | awk '{print $1}')"
 for _ in $(seq 1 30); do
