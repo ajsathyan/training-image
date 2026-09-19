@@ -51,8 +51,8 @@ RUN test "$TARGETARCH" = "amd64" \
     && /opt/agora-venv/bin/python -c 'import sys, torch; assert sys.version_info[:2] == (3, 13), sys.version; assert torch.__version__.startswith("2.11."), torch.__version__'
 
 # The canonical Fleet repair path intentionally uses pip --no-build-isolation.
-# Keep its build backend and editable-wheel helper in the runtime interpreter;
-# the isolated uv builds below do not make those packages available at runtime.
+# Keep its build backend and editable-wheel helper in the runtime interpreter
+# so the image build and any later in-place repair use the same toolchain.
 RUN /opt/agora-venv/bin/uv pip install --python /opt/agora-venv/bin/python \
         --no-deps --require-hashes -r /tmp/image-repair-build-requirements.txt \
     && /opt/agora-venv/bin/python - <<'PY'
@@ -70,15 +70,10 @@ RUN git clone --filter=blob:none --no-checkout "$TRAINING_REPO_URL" /opt/agora-s
     && git -C /opt/agora-source fetch --depth 1 origin "$TRAINING_REPO_REF" \
     && git -C /opt/agora-source checkout --detach "$TRAINING_REPO_REF" \
     && test "$(git -C /opt/agora-source rev-parse HEAD)" = "$TRAINING_REPO_REF" \
-    && cd /opt/agora-source/pithos \
-    && /opt/agora-venv/bin/uv pip install --python /opt/agora-venv/bin/python \
-        --no-deps --build-constraint ../constraints.txt -e . \
-    && cd /opt/agora-source/agora_server \
-    && /opt/agora-venv/bin/uv pip install --python /opt/agora-venv/bin/python \
-        --no-deps -e . \
-    && cd /opt/agora-source/agora \
-    && /opt/agora-venv/bin/uv pip install --python /opt/agora-venv/bin/python \
-        --no-deps --build-constraint ../constraints.txt -e . \
+    && cd /opt/agora-source \
+    && /opt/agora-venv/bin/python -m pip install \
+        --no-build-isolation --no-deps \
+        -e ./pithos -e ./agora_server -e ./agora \
     && /opt/agora-venv/bin/python - <<'PY'
 import pathlib
 import agora
