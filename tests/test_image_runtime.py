@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import hashlib
 import json
@@ -31,6 +32,8 @@ image_runtime = load_module(
     "fleet_image_runtime_test",
     ROOT / "machine-runtime" / "scripts" / "agora_control" / "execution" / "image_runtime.py",
 )
+sys.path.insert(0, str(ROOT / "machine-runtime" / "scripts"))
+remote_assets = importlib.import_module("agora_control.monitoring.remote_assets")
 RUNTIME_FINGERPRINT = json.loads(
     (ROOT / "machine-runtime" / "manifest.json").read_text(encoding="utf-8")
 )["artifactFingerprint"]
@@ -60,11 +63,18 @@ def production_machine(
         "provider": "runpod",
         "accountScope": "account-a",
         "providerResourceId": "pod-a",
+        "fleetId": "fleet-a",
+        "authorityEpoch": 5,
         "tokenLabel": token_label,
         "tokenInstance": token_instance,
         "assignmentGeneration": generation,
         "assignmentOperationId": operation,
         "runId": "run-a",
+        "launchId": "launch-a",
+        "reservationId": "reservation-a",
+        "slotId": "slot-a",
+        "slotGeneration": 1,
+        "machineGenerationId": "machine-generation-a",
         "gpuModel": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
         "agoraJoinRole": "tail",
         "provisioningOrigin": "existing_rental",
@@ -100,6 +110,210 @@ def production_config(
 
 
 class ImageBootstrapContractTests(unittest.TestCase):
+    def test_fleet_config_preserves_machine_sentinel_lifecycle_identity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = valid_config(Path(directory) / "agora-run")
+        expected = {
+            "launchId": "launch-a",
+            "reservationId": "reservation-a",
+            "slotId": "slot-a",
+            "slotGeneration": 1,
+            "machineGenerationId": "machine-generation-a",
+        }
+        self.assertEqual({key: config[key] for key in expected}, expected)
+        normalized, _root = bootstrap._validated(config, "token")
+        projected = bootstrap._sentinel_machine(normalized)
+        self.assertEqual({key: projected[key] for key in expected}, expected)
+        identity = remote_assets.machine_sentinel_identity(
+            projected,
+            {
+                "fleetId": "fleet-a",
+                "includeProviderBindingIdentity": True,
+                "setupRevision": "revision-a",
+            },
+            FleetError=bootstrap.BootstrapError,
+        )
+        self.assertEqual({key: identity[key] for key in expected}, expected)
+
+    def test_missing_sentinel_lifecycle_identity_is_optional_service_failure(
+        self,
+    ) -> None:
+        identity_fields = (
+            "launchId",
+            "reservationId",
+            "slotId",
+            "slotGeneration",
+            "machineGenerationId",
+        )
+        for name in identity_fields:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory) / "agora-run"
+                    root.mkdir(parents=True)
+                    machine = production_machine(root)
+                    machine.pop(name)
+                    config = image_runtime.build_machine_image_config(
+                        machine,
+                        token_sha256=hashlib.sha256(b"token").hexdigest(),
+                        start_training=False,
+                    )
+                    normalized, _ = bootstrap._validated(config, "token")
+                    result = bootstrap._record_optional(
+                        root,
+                        "sentinel",
+                        lambda: bootstrap._sentinel_machine(normalized),
+                    )
+                self.assertEqual(result["status"], "unavailable")
+                self.assertIn(name, result["detail"])
+
+    def test_invalid_sentinel_slot_generation_is_optional_service_failure(self) -> None:
+        for value in (None, 0, True, "1"):
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory) / "agora-run"
+                    root.mkdir(parents=True)
+                    machine = production_machine(root)
+                    machine["slotGeneration"] = value
+                    config = image_runtime.build_machine_image_config(
+                        machine,
+                        token_sha256=hashlib.sha256(b"token").hexdigest(),
+                        start_training=False,
+                    )
+                    normalized, _ = bootstrap._validated(config, "token")
+                    result = bootstrap._record_optional(
+                        root,
+                        "sentinel",
+                        lambda: bootstrap._sentinel_machine(normalized),
+                    )
+                self.assertEqual(result["status"], "unavailable")
+                self.assertIn("slotGeneration", result["detail"])
+
+    def test_invalid_sentinel_lifecycle_identifier_is_optional_service_failure(
+        self,
+    ) -> None:
+        for name in ("launchId", "reservationId", "slotId", "machineGenerationId"):
+            for value in (None, "", "bad\nvalue", 7):
+                with self.subTest(name=name, value=value):
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory) / "agora-run"
+                        root.mkdir(parents=True)
+                        machine = production_machine(root)
+                        machine[name] = value
+                        config = image_runtime.build_machine_image_config(
+                            machine,
+                            token_sha256=hashlib.sha256(b"token").hexdigest(),
+                            start_training=False,
+                        )
+                        normalized, _ = bootstrap._validated(config, "token")
+                        result = bootstrap._record_optional(
+                            root,
+                            "sentinel",
+                            lambda: bootstrap._sentinel_machine(normalized),
+                        )
+                    self.assertEqual(result["status"], "unavailable")
+                    self.assertIn(name, result["detail"])
+
+    def test_local_and_remote_sentinel_fleet_identity_is_composed_exactly(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            machine = production_machine(Path(directory) / "agora-run")
+            local = image_runtime.build_machine_image_config(
+                machine,
+                token_sha256=hashlib.sha256(b"token").hexdigest(),
+                start_training=False,
+                sentinel={"url": "", "exportEnabled": False},
+            )
+            remote = image_runtime.build_machine_image_config(
+                machine,
+                token_sha256=hashlib.sha256(b"token").hexdigest(),
+                start_training=False,
+                sentinel={
+                    "url": "https://sentinel.example.invalid/observe",
+                    "exportEnabled": True,
+                    "fleetId": "fleet-a",
+                    "authorityEpoch": 5,
+                    "machineToken": "fixture-machine-token",
+                },
+            )
+        self.assertEqual(local["sentinel"]["mode"], "local")
+        self.assertEqual(local["sentinel"]["fleetId"], "fleet-a")
+        self.assertEqual(remote["sentinel"]["mode"], "remote")
+        self.assertEqual(remote["sentinel"]["fleetId"], "fleet-a")
+        self.assertEqual(remote["sentinel"]["authorityEpoch"], 5)
+
+    def test_missing_local_sentinel_fleet_id_is_optional_service_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "agora-run"
+            root.mkdir(parents=True)
+            machine = production_machine(root)
+            machine.pop("fleetId")
+            config = image_runtime.build_machine_image_config(
+                machine,
+                token_sha256=hashlib.sha256(b"token").hexdigest(),
+                start_training=False,
+                sentinel={"url": "", "exportEnabled": False},
+            )
+            normalized, _ = bootstrap._validated(config, "token")
+            projected = bootstrap._machine(normalized)
+            result = bootstrap._record_optional(
+                root,
+                "sentinel",
+                lambda: remote_assets.machine_sentinel_identity(
+                    projected,
+                    {"fleetId": config["sentinel"].get("fleetId")},
+                    FleetError=bootstrap.BootstrapError,
+                ),
+            )
+        self.assertEqual(result["status"], "unavailable")
+        self.assertIn("fleetId", result["detail"])
+
+    def test_conflicting_sentinel_fleet_id_is_rejected_before_render(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            machine = production_machine(Path(directory) / "agora-run")
+            with self.assertRaisesRegex(ValueError, "conflicting fleetId"):
+                image_runtime.build_machine_image_config(
+                    machine,
+                    token_sha256=hashlib.sha256(b"token").hexdigest(),
+                    start_training=False,
+                    sentinel={
+                        "url": "https://sentinel.example.invalid/observe",
+                        "exportEnabled": True,
+                        "fleetId": "fleet-b",
+                        "authorityEpoch": 5,
+                        "machineToken": "fixture-machine-token",
+                    },
+                )
+
+    def test_sentinel_observation_identity_does_not_change_assignment_fence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            machine = production_machine(Path(directory) / "agora-run")
+            baseline = image_runtime.build_assignment_manifest(
+                machine,
+                token_sha256=hashlib.sha256(b"token").hexdigest(),
+                state="staged",
+            )
+            changed = {
+                **machine,
+                "launchId": "launch-b",
+                "reservationId": "reservation-b",
+                "slotId": "slot-b",
+                "slotGeneration": 2,
+                "machineGenerationId": "machine-generation-b",
+            }
+            observed = image_runtime.build_assignment_manifest(
+                changed,
+                token_sha256=hashlib.sha256(b"token").hexdigest(),
+                state="staged",
+            )
+        self.assertEqual(observed, baseline)
+
     def test_configured_heartbeat_stages_baked_assets_from_separate_secret(
         self,
     ) -> None:
@@ -287,6 +501,12 @@ class ImageBootstrapContractTests(unittest.TestCase):
             conflict = {**current, "tokenLabel": "bob"}
             with self.assertRaisesRegex(bootstrap.BootstrapError, "conflicts"):
                 bootstrap._check_existing_identity(root, conflict)
+
+            provider_conflict = {**current, "providerResourceId": "pod-b"}
+            with self.assertRaisesRegex(
+                bootstrap.BootstrapError, "does not match launch configuration"
+            ):
+                bootstrap._check_existing_identity(root, provider_conflict)
 
     def test_exact_newer_fence_authorizes_prior_identity_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

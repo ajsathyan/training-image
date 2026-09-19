@@ -177,6 +177,15 @@ def _validated(config: dict[str, Any], token: str) -> tuple[dict[str, Any], Path
         assignmentGeneration=_positive_int(config, "assignmentGeneration"),
         tokenInstance=_positive_int(config, "tokenInstance"),
     )
+    for name in (
+        "launchId",
+        "reservationId",
+        "slotId",
+        "slotGeneration",
+        "machineGenerationId",
+    ):
+        if name in config:
+            normalized[name] = config[name]
     node_type = str(config.get("nodeType") or "").strip().lower()
     if node_type not in {"head", "body", "tail"}:
         raise BootstrapError("machine configuration has invalid nodeType")
@@ -543,6 +552,11 @@ def _machine(config: dict[str, Any]) -> dict[str, Any]:
         "assignmentOperationId": config["assignmentOperationId"],
         "tokenSha256": config["tokenSha256"],
         "runId": config["runId"],
+        "launchId": config.get("launchId"),
+        "reservationId": config.get("reservationId"),
+        "slotId": config.get("slotId"),
+        "slotGeneration": config.get("slotGeneration"),
+        "machineGenerationId": config.get("machineGenerationId"),
         "trainingSessionId": config["trainingSessionId"],
         "gpuModel": config["gpuModel"],
         "agoraJoinRole": config["nodeType"],
@@ -708,6 +722,18 @@ def _sentinel_secret_path(
     return path
 
 
+def _sentinel_machine(config: dict[str, Any]) -> dict[str, Any]:
+    machine = {
+        **_machine(config),
+        "providerIdentitySource": "launch_configuration",
+        "providerMachineId": config["providerResourceId"],
+    }
+    for name in ("launchId", "reservationId", "slotId", "machineGenerationId"):
+        machine[name] = _identifier(config, name)
+    machine["slotGeneration"] = _positive_int(config, "slotGeneration")
+    return machine
+
+
 def _durable_sentinel_token(root: Path) -> str:
     path = root / "machine-sentinel" / "credential.env"
     if not path.is_file():
@@ -759,11 +785,7 @@ def _sentinel(root: Path, config: dict[str, Any], remote_assets: Any) -> None:
         "authorityEpoch": sentinel_authority_epoch,
         "includeProviderBindingIdentity": True,
     }
-    machine = {
-        **_machine(config),
-        "providerIdentitySource": "launch_configuration",
-        "providerMachineId": config["providerResourceId"],
-    }
+    machine = _sentinel_machine(config)
     identity_fn = functools.partial(
         remote_assets.machine_sentinel_identity, FleetError=BootstrapError
     )
@@ -1205,6 +1227,11 @@ def main() -> int:
                 "provider": normalized["provider"],
                 "accountScope": normalized["accountScope"],
                 "providerResourceId": normalized["providerResourceId"],
+                "launchId": normalized.get("launchId"),
+                "reservationId": normalized.get("reservationId"),
+                "slotId": normalized.get("slotId"),
+                "slotGeneration": normalized.get("slotGeneration"),
+                "machineGenerationId": normalized.get("machineGenerationId"),
                 "assignmentOperationId": normalized["assignmentOperationId"],
                 "assignmentGeneration": normalized["assignmentGeneration"],
                 "assignmentTransition": {

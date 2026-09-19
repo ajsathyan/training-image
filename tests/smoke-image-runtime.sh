@@ -110,6 +110,9 @@ jq -n \
     id:"machine-smoke", provider:"runpod", accountScope:"account-smoke",
     providerResourceId:"pod-smoke", tokenLabel:"smoke-user", tokenInstance:3,
     assignmentGeneration:4, assignmentOperationId:"assignment-operation-smoke",
+    launchId:"launch-smoke", reservationId:"reservation-smoke",
+    slotId:"slot-smoke", slotGeneration:1,
+    machineGenerationId:"machine-generation-smoke",
     runId:"run-smoke", gpuModel:"NVIDIA RTX PRO 6000 Blackwell Server Edition",
     agoraJoinRole:"tail", provisioningOrigin:"existing_rental",
     hostPort:49200, announcePort:55001, remoteRoot:"/workspace/agora-run",
@@ -162,8 +165,14 @@ ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
     .status == "ready" and
     .machineId == "machine-smoke" and
     .assignmentOperationId == "assignment-operation-smoke" and
+    .launchId == "launch-smoke" and
+    .reservationId == "reservation-smoke" and
+    .slotId == "slot-smoke" and
+    .slotGeneration == 1 and
+    .machineGenerationId == "machine-generation-smoke" and
     .training.requested == false and
     .training.status == "staged" and
+    .optional.sentinel.status == "ready" and
     .optional.inspection.status == "ready" and
     .optional.px0.status == "ready"
   '\'' /workspace/agora-run/bootstrap-receipt.json >/dev/null
@@ -181,8 +190,7 @@ ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   # Bootstrap launches the inspection watcher and px0 asynchronously. Wait for
   # their exact postconditions instead of racing the first scheduler tick.
   for _ in $(seq 1 50); do
-    if tmux has-session -t agora_sentinel 2>/dev/null \
-      && tmux has-session -t agora_px0 2>/dev/null \
+    if tmux has-session -t agora_px0 2>/dev/null \
       && tmux has-session -t agora_inspection 2>/dev/null \
       && pgrep -x px0 >/dev/null \
       && ss -ltn | grep -Eq '\''127\.0\.0\.1:7777[[:space:]]'\''; then

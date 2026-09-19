@@ -92,6 +92,21 @@ def _positive_int(
     return value
 
 
+def _optional_text(machine: Mapping[str, Any], name: str) -> str | None:
+    value = machine.get(name)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _optional_positive_int(machine: Mapping[str, Any], name: str) -> int | None:
+    value = machine.get(name)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        return None
+    return value
+
+
 def _remote_root(machine: Mapping[str, Any], *, error: type[Exception]) -> str:
     value = str(machine.get("remoteRoot") or DEFAULT_REMOTE_ROOT).strip()
     components = [part for part in value.split("/") if part]
@@ -279,6 +294,8 @@ def build_machine_image_config(
         "url": sentinel_url if sentinel_remote else "",
         "timeoutSeconds": sentinel_timeout,
     }
+    if fleet_id:
+        sentinel_config["fleetId"] = fleet_id
     if sentinel_remote:
         if not fleet_id:
             raise error("declared image remote Sentinel setup requires fleetId")
@@ -290,7 +307,6 @@ def build_machine_image_config(
             raise error(
                 "declared image remote Sentinel setup requires authorityEpoch"
             )
-        sentinel_config["fleetId"] = fleet_id
         sentinel_config["authorityEpoch"] = authority_epoch
         bootstrap_token = str(sentinel.get("bootstrapToken") or "")
         machine_token = str(sentinel.get("machineToken") or "")
@@ -345,6 +361,11 @@ def build_machine_image_config(
     config: dict[str, Any] = {
         "schemaVersion": CONFIG_SCHEMA,
         "machineId": _text(machine, "id", "machineId", error=error),
+        "launchId": _optional_text(machine, "launchId"),
+        "reservationId": _optional_text(machine, "reservationId"),
+        "slotId": _optional_text(machine, "slotId"),
+        "slotGeneration": _optional_positive_int(machine, "slotGeneration"),
+        "machineGenerationId": _optional_text(machine, "machineGenerationId"),
         "provider": _text(machine, "provider", error=error).lower(),
         "accountScope": _text(machine, "accountScope", "providerAccount", error=error).lower(),
         "providerResourceId": _text(
