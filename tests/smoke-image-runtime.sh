@@ -18,8 +18,18 @@ cleanup() {
     docker logs "$configured" 2>/dev/null || true
   fi
   if [ -n "$tunnel_pid" ]; then kill "$tunnel_pid" >/dev/null 2>&1 || true; fi
+  # Runtime privacy leaves nested fixture directories root-owned and 0700.
+  # Remove only the exact bind-mount contents as container root before the
+  # containers disappear; every cleanup command is best-effort so it cannot
+  # replace the original smoke result.
+  docker exec "$configured" sh -c \
+    'find /workspace/agora-run -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +' \
+    >/dev/null 2>&1 || true
+  docker exec "$training" sh -c \
+    'find /workspace/agora-run /run/agora-inspection -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +' \
+    >/dev/null 2>&1 || true
   docker rm -f "$neutral" "$configured" "$training" >/dev/null 2>&1 || true
-  rm -rf "$work"
+  rm -rf "$work" >/dev/null 2>&1 || true
   exit "$status"
 }
 trap cleanup EXIT
