@@ -15,10 +15,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def load_module():
+def load_module(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(
-        "assignment_transition_test",
-        ROOT / "image-runtime" / "assignment_transition.py",
+        name,
+        path,
     )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -27,31 +27,62 @@ def load_module():
     return module
 
 
-transition = load_module()
+transition = load_module(
+    "assignment_transition_test", ROOT / "image-runtime" / "assignment_transition.py"
+)
+image_runtime = load_module(
+    "fleet_image_runtime_transition_test",
+    ROOT / "machine-runtime" / "scripts" / "agora_control" / "execution" / "image_runtime.py",
+)
+RUNTIME_FINGERPRINT = json.loads(
+    (ROOT / "machine-runtime" / "manifest.json").read_text(encoding="utf-8")
+)["artifactFingerprint"]
 
 
-def config(root: Path, *, generation: int = 1, operation: str = "operation-1"):
-    return {
+def config(
+    root: Path,
+    *,
+    generation: int = 1,
+    operation: str = "operation-1",
+    kind: str = "stage",
+    expected: dict[str, object] | None = None,
+):
+    machine = {
         "remoteRoot": str(root),
         "assignmentOperationId": operation,
         "assignmentGeneration": generation,
         "tokenLabel": f"label-{generation}",
         "tokenInstance": generation,
-        "machineId": "machine-1",
+        "id": "machine-1",
         "provider": "runpod",
         "accountScope": "account-1",
         "providerResourceId": "pod-1",
-        "tokenSha256": str(generation) * 64,
-        "assignmentTransition": {
-            "kind": "stage",
-            "allowAbsent": True,
-            "expectedManifest": None,
+        "runId": "run-1",
+        "gpuModel": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        "agoraJoinRole": "tail",
+        "announcePort": 55001,
+        "imageCapability": {
+            "contractVersion": "agora.machine-image-capability.v1",
+            "runtimeArtifactFingerprint": RUNTIME_FINGERPRINT,
         },
     }
+    return image_runtime.build_machine_image_config(
+        machine,
+        token_sha256=str(generation) * 64,
+        start_training=kind == "ready",
+        sentinel={"url": "", "exportEnabled": False},
+        assignment_transition={
+            "kind": kind,
+            "allowAbsent": expected is None and kind != "rollback_prior",
+            "expectedManifest": expected,
+        },
+    )
 
 
 def manifest(value: dict[str, object], state: str) -> dict[str, object]:
-    return {**transition.assignment_binding(value), "state": state}
+    return image_runtime.build_assignment_manifest(
+        value, token_sha256=str(value["tokenSha256"]), state=state
+    )
 
 
 def write_manifest(root: Path, value: dict[str, object]) -> None:
@@ -70,14 +101,7 @@ class AssignmentTransitionTests(unittest.TestCase):
                 staged = decision.commit()
             self.assertEqual(staged["state"], "staged")
 
-            ready_config = {
-                **staged_config,
-                "assignmentTransition": {
-                    "kind": "ready",
-                    "allowAbsent": False,
-                    "expectedManifest": staged,
-                },
-            }
+            ready_config = config(root, kind="ready", expected=staged)
             with transition.assignment_transition(root, ready_config) as decision:
                 ready = decision.commit()
             self.assertEqual(ready["state"], "ready")
@@ -94,7 +118,10 @@ class AssignmentTransitionTests(unittest.TestCase):
             )
             self.assertEqual(verified["operationId"], "operation-1")
 
-            with transition.assignment_transition(root, staged_config) as delayed_stage:
+            delayed_stage_config = config(root, kind="stage", expected=ready)
+            with transition.assignment_transition(
+                root, delayed_stage_config
+            ) as delayed_stage:
                 self.assertTrue(delayed_stage.idempotent)
                 self.assertEqual(delayed_stage.target_state, "ready")
                 delayed_stage.commit()
@@ -157,12 +184,7 @@ class AssignmentTransitionTests(unittest.TestCase):
             newer = config(root, generation=2, operation="operation-2")
             newer_fence = manifest(newer, "fenced")
             write_manifest(root, newer_fence)
-            prior = config(root)
-            prior["assignmentTransition"] = {
-                "kind": "rollback_prior",
-                "allowAbsent": False,
-                "expectedManifest": newer_fence,
-            }
+            prior = config(root, kind="rollback_prior", expected=newer_fence)
             with transition.assignment_transition(root, prior) as decision:
                 self.assertTrue(decision.rollback_authorized)
                 restored = decision.commit()
@@ -171,10 +193,8 @@ class AssignmentTransitionTests(unittest.TestCase):
             self.assertEqual(restored["state"], "fenced")
 
             write_manifest(root, newer_fence)
-            prior["assignmentTransition"]["expectedManifest"] = {
-                **newer_fence,
-                "operationId": "wrong-operation",
-            }
+            wrong_fence = {**newer_fence, "operationId": "wrong-operation"}
+            prior = config(root, kind="rollback_prior", expected=wrong_fence)
             with self.assertRaisesRegex(
                 transition.AssignmentTransitionError, "precondition"
             ):

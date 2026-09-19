@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import functools
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -58,9 +59,21 @@ def _load_runtime_modules():
 
 
 def _assert_no_owned_training_processes(root: Path, _decision: Any) -> None:
-    from machine_sentinel.process_contract import (  # type: ignore
-        assignment_owned_process_discovery_shell,
+    contract_path = (
+        RUNTIME_DIR / "scripts" / "machine_sentinel" / "process_contract.py"
     )
+    spec = importlib.util.spec_from_file_location(
+        "agora_image_process_contract", contract_path
+    )
+    if spec is None or spec.loader is None:
+        raise BootstrapError("image process ownership contract is unavailable")
+    process_contract = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(process_contract)
+    assignment_owned_process_discovery_shell = getattr(
+        process_contract, "assignment_owned_process_discovery_shell", None
+    )
+    if not callable(assignment_owned_process_discovery_shell):
+        raise BootstrapError("image process ownership contract is invalid")
 
     discovery = assignment_owned_process_discovery_shell(
         training_source_root=str(TRAINING_SOURCE)

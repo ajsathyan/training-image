@@ -23,6 +23,7 @@ def canonical_machine_runtime_manifest(root: Path) -> dict[str, Any]:
         root / "scripts" / "agora_heartbeat_agent.py",
         root / "scripts" / "agora_machine_sentinel_agent.py",
         root / "scripts" / "agora_control" / "execution" / "assets.py",
+        root / "scripts" / "agora_control" / "execution" / "image_runtime.py",
         root / "scripts" / "agora_control" / "monitoring" / "remote_assets.py",
         root / "scripts" / "agora_control" / "runtime_manifest.py",
         *(sorted((root / "scripts" / "machine_sentinel").glob("*.py"))),
@@ -42,6 +43,12 @@ def canonical_machine_runtime_manifest(root: Path) -> dict[str, Any]:
             "collector": "scripts/agora_machine_sentinel_agent.py",
             "heartbeatAgent": "scripts/agora_heartbeat_agent.py",
             "setupRenderer": "scripts/agora_control/execution/assets.py",
+            "assignmentConfigRenderer": (
+                "scripts/agora_control/execution/image_runtime.py:build_machine_image_config"
+            ),
+            "assignmentManifestRenderer": (
+                "scripts/agora_control/execution/image_runtime.py:build_assignment_manifest"
+            ),
             "runtimeBundleRenderer": (
                 "scripts/agora_control/execution/assets.py:render_machine_runtime_bundle"
             ),

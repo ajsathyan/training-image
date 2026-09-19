@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import posixpath
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -560,6 +561,7 @@ def remote_assignment_fence_script(
     expected_assignment: Mapping[str, Any] | None,
     eligibility: Mapping[str, Any],
     render: ScriptRenderers,
+    training_source_root: str | None = None,
 ) -> str:
     """Fence one exact assignment, stop its restart paths, and prove no child."""
 
@@ -578,11 +580,12 @@ def remote_assignment_fence_script(
     encoded_precondition = render.shell_quote(
         json.dumps(precondition, sort_keys=True, separators=(",", ":"))
     )
+    training_source = training_source_root or f"{remote_root}/agora-source"
     return f"""#!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT={render.shell_quote(remote_root)}
 mkdir -p "$ROOT"
-{_assignment_shell_contract(context, render=render)}
+{_assignment_shell_contract(context, render=render, training_source_root=training_source_root)}
 FENCE_PRECONDITION_JSON={encoded_precondition}
 fence_source_assignment_matches() {{
   if [ -f "$ASSIGNMENT_MANIFEST" ]; then
@@ -672,7 +675,7 @@ cat > "$wrapper_template" <<'ASSIGNMENT_WRAPPER_EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT={render.shell_quote(remote_root)}
-{_assignment_shell_contract(context, render=render)}
+{_assignment_shell_contract(context, render=render, training_source_root=training_source_root)}
 assignment_guard_ready
 assignment_token_matches
 case "${{0##*/}}" in
@@ -757,7 +760,8 @@ tmux kill-session -t agora_sentinel >/dev/null 2>&1 || true
 tmux kill-session -t agora_heartbeat >/dev/null 2>&1 || true
 tmux kill-session -t agora_gpu >/dev/null 2>&1 || true
 assignment_stop_owned_servers
-AGORA_CHILD_PATTERN="$ROOT/(supervise|launch)-agora-gpu0[.]sh|$ROOT/agora-source/.*(agora_cli|run_server)[.]py"
+AGORA_TRAINING_SOURCE={render.shell_quote(training_source)}
+AGORA_CHILD_PATTERN="$ROOT/(supervise|launch)-agora-gpu0[.]sh|$AGORA_TRAINING_SOURCE/.*(agora_cli|run_server)[.]py"
 for _ in 1 2 3 4 5; do
   pane_alive=0
   child_alive=0
@@ -841,6 +845,145 @@ assignment_guard_release
 """
 
 
+def remote_assignment_image_bootstrap_script(
+    machine: dict[str, Any],
+    *,
+    token_sha256: str,
+    bootstrap_script: str,
+    start_training: bool,
+    render: ScriptRenderers,
+    training_source_root: str,
+) -> str:
+    """Run the baked assignment bootstrap between exact fence checks."""
+
+    remote_root = _validated_assignment_remote_root(
+        machine, render.default_remote_root
+    )
+    context = _assignment_context(machine, token_sha256=token_sha256)
+    if context is None:
+        raise ValueError("image assignment bootstrap requires generation metadata")
+    if not str(bootstrap_script or "").strip():
+        raise ValueError("image assignment bootstrap script is required")
+    if start_training:
+        precondition = ""
+        expected_state = "ready"
+        marker = "__AGORA_ASSIGNMENT_START_REQUESTED__"
+        postcondition = ""
+    else:
+        precondition = """if ! assignment_manifest_matches ready; then
+  assignment_assert_no_owned_servers
+fi"""
+        expected_state = "staged_or_ready"
+        marker = "__AGORA_ASSIGNMENT_STAGED__"
+        postcondition = """if assignment_manifest_matches staged; then
+  assignment_assert_no_owned_servers
+elif ! assignment_manifest_matches ready; then
+  assignment_fail "image bootstrap did not preserve staged or already-ready assignment state"
+fi
+"""
+    state_check = (
+        ""
+        if expected_state == "staged_or_ready"
+        else (
+            f"assignment_manifest_matches {expected_state} || "
+            'assignment_fail "image bootstrap did not preserve the exact assignment state"'
+        )
+    )
+    return f"""#!/usr/bin/env bash
+set -Eeuo pipefail
+ROOT={render.shell_quote(remote_root)}
+mkdir -p "$ROOT"
+{_assignment_shell_contract(context, render=render, training_source_root=training_source_root)}
+assignment_guard_acquire
+{precondition}
+assignment_guard_release
+{bootstrap_script.rstrip()}
+assignment_guard_acquire
+{state_check}
+assignment_token_matches
+{postcondition}printf '{marker} generation=%s operation=%s\n' \
+  {context['assignmentGeneration']} {render.shell_quote(context['operationId'])}
+assignment_guard_release
+"""
+
+
+def remote_assignment_image_restore_stopped_script(
+    machine: dict[str, Any],
+    *,
+    token_sha256: str,
+    fenced_machine: dict[str, Any],
+    fenced_token_sha256: str,
+    bootstrap_script: str,
+    fenced_operation_id: str,
+    fenced_assignment_generation: int,
+    render: ScriptRenderers,
+    training_source_root: str,
+) -> str:
+    """Restore baked prior config while retaining a stopped assignment fence."""
+
+    remote_root = _validated_assignment_remote_root(
+        machine, render.default_remote_root
+    )
+    context = _assignment_context(machine, token_sha256=token_sha256)
+    if context is None:
+        raise ValueError("image assignment restore requires generation metadata")
+    fenced_context = _assignment_context(
+        fenced_machine, token_sha256=fenced_token_sha256
+    )
+    if fenced_context is None:
+        raise ValueError("image assignment restore requires current fence metadata")
+    if (
+        fenced_context["operationId"] != fenced_operation_id
+        or fenced_context["assignmentGeneration"]
+        != fenced_assignment_generation
+    ):
+        raise ValueError("image assignment restore current fence is inconsistent")
+    if context["operationId"] != fenced_operation_id:
+        raise ValueError("image assignment restore prior fence is inconsistent")
+    if (
+        not isinstance(fenced_assignment_generation, int)
+        or isinstance(fenced_assignment_generation, bool)
+        or fenced_assignment_generation < context["assignmentGeneration"]
+    ):
+        raise ValueError("fenced assignment generation is invalid")
+    if not str(bootstrap_script or "").strip():
+        raise ValueError("image assignment restore bootstrap script is required")
+    return f"""#!/usr/bin/env bash
+set -Eeuo pipefail
+ROOT={render.shell_quote(remote_root)}
+{_assignment_shell_contract(context, render=render, training_source_root=training_source_root)}
+assignment_guard_acquire
+if assignment_manifest_matches fenced; then
+  assignment_token_matches
+  assignment_assert_no_owned_servers
+  printf '__AGORA_ASSIGNMENT_RESTORED__ generation=%s operation=%s stopped=yes\n' \
+    {context['assignmentGeneration']} {render.shell_quote(fenced_operation_id)}
+  assignment_guard_release
+  exit 0
+fi
+assignment_guard_release
+{_assignment_shell_contract(fenced_context, render=render, training_source_root=training_source_root)}
+assignment_guard_acquire
+if assignment_manifest_matches staged; then
+  assignment_assert_no_owned_servers
+  assignment_manifest_write fenced
+elif ! assignment_manifest_matches fenced; then
+  assignment_fail "matching current image fence or stage is required before restore"
+fi
+assignment_assert_no_owned_servers
+assignment_guard_release
+{bootstrap_script.rstrip()}
+{_assignment_shell_contract(context, render=render, training_source_root=training_source_root)}
+assignment_guard_acquire
+assignment_token_matches
+assignment_assert_no_owned_servers
+assignment_manifest_matches fenced || assignment_fail "image restore did not preserve the prior exact fence"
+printf '__AGORA_ASSIGNMENT_RESTORED__ generation=%s operation=%s stopped=yes\n' \
+  {context['assignmentGeneration']} {render.shell_quote(fenced_operation_id)}
+assignment_guard_release
+"""
+
+
 def remote_assignment_restore_stopped_script(
     machine: dict[str, Any],
     token: str,
@@ -883,11 +1026,11 @@ jq -e --arg operation {render.shell_quote(fenced_operation_id)} \
   --arg provider {render.shell_quote(context['provider'])} \
   --arg account {render.shell_quote(context['accountScope'])} \
   --arg resource {render.shell_quote(context['providerResourceId'])} '
-    .schemaVersion == 1 and .state == "fenced" and
+    .schemaVersion == 1 and (.state == "fenced" or .state == "staged") and
     .operationId == $operation and .assignmentGeneration == $generation and
     .machineId == $machine and .provider == $provider and
     .accountScope == $account and .providerResourceId == $resource
-  ' "$ASSIGNMENT_MANIFEST" >/dev/null 2>&1 || assignment_fail "matching operation fence is required before restore"
+  ' "$ASSIGNMENT_MANIFEST" >/dev/null 2>&1 || assignment_fail "matching operation fence or stage is required before restore"
 env_tmp="$(mktemp "$ROOT/.agora.env.restore.XXXXXX")"
 if [ -f "$ROOT/agora.env" ]; then
   grep -Ev '^(HF_TOKEN|TOKEN_LABEL|MACHINE_ID)=' "$ROOT/agora.env" > "$env_tmp" || true
@@ -939,7 +1082,9 @@ set -Eeuo pipefail
 ROOT={render.shell_quote(remote_root)}
 {_assignment_shell_contract(context, render=render)}
 assignment_guard_acquire
-assignment_manifest_matches fenced || assignment_fail "matching operation fence is required before prepared restore"
+if ! assignment_manifest_matches fenced && ! assignment_manifest_matches staged; then
+  assignment_fail "matching operation fence or stage is required before prepared restore"
+fi
 if [ -f "$ROOT/agora.env" ]; then
   env_tmp="$(mktemp "$ROOT/.agora.env.prepared.XXXXXX")"
   grep -Ev '^(HF_TOKEN|TOKEN_LABEL|MACHINE_ID|ANNOUNCE_IP|ANNOUNCE_PORT|AGORA_TRAINING_RUN_ID|AGORA_TRAINING_PLAN_ID|AGORA_CONFIGURATION_REVISION)=' \
@@ -961,8 +1106,9 @@ done
 tmux kill-session -t agora_sentinel >/dev/null 2>&1 || true
 tmux kill-session -t agora_heartbeat >/dev/null 2>&1 || true
 tmux kill-session -t agora_gpu >/dev/null 2>&1 || true
-rm -rf -- "$ROOT/machine-sentinel" "$ROOT/heartbeat-agent"
+rm -rf -- "$ROOT/machine-sentinel" "$ROOT/heartbeat-agent" "$ROOT/controller-input"
 rm -f -- \
+  "$ROOT/bootstrap-receipt.json" \
   "$ROOT/token-label.txt" \
   "$ROOT/machine.json" \
   "$ROOT/private_gpu0.key" \
@@ -980,6 +1126,7 @@ rm -f -- \
   "$ROOT/start-agora-heartbeat.sh"* \
   "$ROOT/watchdog-heartbeat-tmux.sh"* \
   "$ROOT/watch-heartbeat-tmux-loop.sh"*
+assignment_manifest_write fenced
 assignment_manifest_matches fenced || assignment_fail "prepared restore changed assignment fence"
 printf '__AGORA_ASSIGNMENT_PREPARED_RESTORED__ generation=%s operation=%s stopped=yes\\n' \
   {context['assignmentGeneration']} {render.shell_quote(context['operationId'])}
@@ -1024,6 +1171,8 @@ def remote_assignment_verify_script(
     token_sha256: str,
     require_running: bool,
     render: ScriptRenderers,
+    verification_body: str = "",
+    training_source_root: str | None = None,
 ) -> str:
     """Prove exact manifest/config identity and optionally a live Agora child."""
 
@@ -1042,10 +1191,11 @@ owned_server_count="$(assignment_owned_server_pids | wc -l | tr -d '[:space:]')"
     return f"""#!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT={render.shell_quote(remote_root)}
-{_assignment_shell_contract(context, render=render)}
+{_assignment_shell_contract(context, render=render, training_source_root=training_source_root)}
 assignment_guard_ready
 assignment_token_matches
-{running}printf '__AGORA_ASSIGNMENT_VERIFIED__ generation=%s operation=%s running=%s\\n' \
+{running}{verification_body.rstrip()}
+printf '__AGORA_ASSIGNMENT_VERIFIED__ generation=%s operation=%s running=%s\\n' \
   {context['assignmentGeneration']} {render.shell_quote(context['operationId'])} {render.shell_quote('yes' if require_running else 'unchecked')}
 assignment_guard_release
 """
@@ -1782,7 +1932,11 @@ def render_baked_heartbeat_runtime_bundle(
             value = float(heartbeat.get(name, default))
         except (TypeError, ValueError) as exc:
             raise ValueError(f"baked heartbeat {name} is invalid") from exc
-        if value < 0 or (not allow_zero and value == 0):
+        if (
+            not math.isfinite(value)
+            or value < 0
+            or (not allow_zero and value == 0)
+        ):
             raise ValueError(f"baked heartbeat {name} is invalid")
         return value
 

@@ -1,5 +1,5 @@
 {
-  "artifactFingerprint": "d8c24c8e7ad0f4e66610641868ece029473ba216a8438becc10daa9423205458",
+  "artifactFingerprint": "15ef8dced50f8a6572a5fdcf3947bf2c35d55e760ee0f020342538157388ebc1",
   "files": [
     {
       "kind": "generated_package_marker",
@@ -19,9 +19,16 @@
     {
       "kind": "source",
       "path": "scripts/agora_control/execution/assets.py",
-      "sha256": "738ef52393f7f927a47617680669c4fd93efefd40197e298838a521836f262a6",
+      "sha256": "7c99b11a8788858fec84cdad18962cc6773761849237f2a99e6e5353cfb90008",
       "sourcePath": "scripts/agora_control/execution/assets.py",
-      "sourceSha256": "738ef52393f7f927a47617680669c4fd93efefd40197e298838a521836f262a6"
+      "sourceSha256": "7c99b11a8788858fec84cdad18962cc6773761849237f2a99e6e5353cfb90008"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/agora_control/execution/image_runtime.py",
+      "sha256": "50371af72a8a683fd79f48ef43aa6a0167dfa1fa3073c7944d8a0394e21b45b9",
+      "sourcePath": "scripts/agora_control/execution/image_runtime.py",
+      "sourceSha256": "50371af72a8a683fd79f48ef43aa6a0167dfa1fa3073c7944d8a0394e21b45b9"
     },
     {
       "kind": "renderer_dependency",
@@ -45,9 +52,9 @@
     {
       "kind": "source",
       "path": "scripts/agora_control/runtime_manifest.py",
-      "sha256": "15ed3e5b77fbbc5df075a13a65dd3a11a613d7557996d68f1742e4633e85e6ee",
+      "sha256": "d2b76e2797ade02dc0145d80daf0e33396777828536ed628f3879703558ed979",
       "sourcePath": "scripts/agora_control/runtime_manifest.py",
-      "sourceSha256": "15ed3e5b77fbbc5df075a13a65dd3a11a613d7557996d68f1742e4633e85e6ee"
+      "sourceSha256": "d2b76e2797ade02dc0145d80daf0e33396777828536ed628f3879703558ed979"
     },
     {
       "kind": "source",
@@ -129,10 +136,10 @@
   ],
   "schemaVersion": "agora.machine-runtime-export.v1",
   "source": {
-    "artifactFingerprint": "981167f77459f758ed06d53eeb6f23d26c31d995fc4337cf87e01783befbcb46",
-    "commit": "63de15e1dcdb85b44681dc64f7a0c3dbc1faebfe",
+    "artifactFingerprint": "2ef224a75cc502ebb04d53180367a546dd41374655ee49a79c69f3c6365a74ff",
+    "commit": "7ff63e5ed211804d92aa94a17251625f90519061",
     "manifestPath": "runtime/machine-runtime-source.v1.json",
-    "manifestSha256": "de6f7c6d51bbfe65622ea2b3e1d983be770cece985176cc29ed46774d8f4943f",
-    "tree": "da1abf323b5850613655085a3bba10e389de37f2"
+    "manifestSha256": "42c4a57e2b9850d555c715c29323769557f83c81ee0a24df73c0595e82d6df4c",
+    "tree": "9481feef793d9aebac96522efe9139752ed5c549"
   }
 }

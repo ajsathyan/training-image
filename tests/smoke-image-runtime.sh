@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 IMAGE="${IMAGE:?IMAGE is required}"
 EVIDENCE="${SMOKE_EVIDENCE:-image-smoke-evidence.json}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 work="$(mktemp -d)"
 neutral="agora-image-neutral-$RANDOM"
 configured="agora-image-configured-$RANDOM"
@@ -93,29 +95,29 @@ chmod 600 "$state/controller-input/hf-token" "$state/controller-input/sentinel-m
 token_hash="$(sha256sum "$state/controller-input/hf-token" | awk '{print $1}')"
 declared_runtime_fingerprint="$(docker exec "$neutral" jq -r .runtimeExport.artifactFingerprint /opt/agora-image-runtime/capability.json)"
 jq -n \
-  --arg token_hash "$token_hash" \
   --arg runtime_fingerprint "$declared_runtime_fingerprint" \
   '{
-    schemaVersion:"agora.machine-image-config.v1",
-    machineId:"machine-smoke", provider:"runpod", accountScope:"account-smoke",
+    id:"machine-smoke", provider:"runpod", accountScope:"account-smoke",
     providerResourceId:"pod-smoke", tokenLabel:"smoke-user", tokenInstance:3,
     assignmentGeneration:4, assignmentOperationId:"assignment-operation-smoke",
-    trainingSessionId:"assignment-operation-smoke", runId:"run-smoke",
-    gpuModel:"NVIDIA RTX PRO 6000 Blackwell Server Edition", nodeType:"tail",
-    provisioningOrigin:"existing_rental", hostPort:49200, announcePort:55001,
-    remoteRoot:"/workspace/agora-run", tokenSha256:$token_hash,
-    imageCapability:{contractVersion:"agora.machine-image-capability.v1",runtimeArtifactFingerprint:$runtime_fingerprint},
-    startTraining:false, px0Enabled:true,
-    assignmentTransition:{kind:"stage",allowAbsent:true,expectedManifest:null},
-    sentinel:{
-      mode:"remote", url:"https://127.0.0.1:9/api/machine-sentinel/observe",
-      fleetId:"fleet-smoke", authorityEpoch:5,
-      machineTokenFile:"/workspace/agora-run/controller-input/sentinel-machine-token",
-      timeoutSeconds:0.2
-    },
-    heartbeat:{mode:"disabled",url:""}
-  }' > "$state/controller-input/machine-config.json"
-chmod 600 "$state/controller-input/machine-config.json"
+    runId:"run-smoke", gpuModel:"NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    agoraJoinRole:"tail", provisioningOrigin:"existing_rental",
+    hostPort:49200, announcePort:55001, remoteRoot:"/workspace/agora-run",
+    px0Enabled:true, fleetId:"fleet-smoke", authorityEpoch:5,
+    imageCapability:{contractVersion:"agora.machine-image-capability.v1",runtimeArtifactFingerprint:$runtime_fingerprint}
+  }' > "$work/configured-machine.json"
+jq -n '{
+  url:"https://127.0.0.1:9/api/machine-sentinel/observe",
+  exportEnabled:true, fleetId:"fleet-smoke", authorityEpoch:5,
+  machineToken:"sentinel_fixture_machine_token_123", timeoutSeconds:0.2
+}' > "$work/configured-sentinel.json"
+python3 "$REPO_ROOT/tests/generate_machine_image_config.py" config \
+  --machine "$work/configured-machine.json" \
+  --token-sha256 "$token_hash" \
+  --output "$state/controller-input/machine-config.json" \
+  --sentinel "$work/configured-sentinel.json" \
+  --transition-kind stage \
+  --allow-absent
 config_hash="$(sha256sum "$state/controller-input/machine-config.json" | awk '{print $1}')"
 printf '%s\n' 'permitted-inspection-marker' > "$state/progress.log"
 
@@ -209,6 +211,73 @@ PY
     > /tmp/image-smoke-orphan-retry.log 2>&1
   jq -e '\''.status == "ready" and .assignmentTransition.state == "staged"'\'' \
     "$root/bootstrap-receipt.json" >/dev/null
+'
+
+# Exercise stale-stage rejection, rollback, and lost-ACK replay using only the
+# exported Fleet production builders for configs and manifests.
+cp -p "$state/controller-input/machine-config.json" "$work/configured-stage-config.json"
+jq \
+  '.assignmentGeneration = 5 |
+   .assignmentOperationId = "assignment-operation-newer" |
+   .tokenLabel = "smoke-user-newer" |
+   .tokenInstance = 4' \
+  "$work/configured-machine.json" > "$work/configured-newer-machine.json"
+python3 "$REPO_ROOT/tests/generate_machine_image_config.py" manifest \
+  --machine "$work/configured-newer-machine.json" \
+  --token-sha256 "$token_hash" \
+  --state fenced \
+  --output "$work/configured-newer-fence.json"
+cp "$work/configured-newer-fence.json" "$state/.assignment.newer.json"
+chmod 600 "$state/.assignment.newer.json"
+mv "$state/.assignment.newer.json" "$state/assignment.json"
+newer_fence_hash="$(sha256sum "$state/assignment.json" | awk '{print $1}')"
+set +e
+docker exec "$configured" /opt/agora-venv/bin/python \
+  /opt/agora-image-runtime/agora_image_bootstrap.py \
+  > "$work/image-smoke-stale-stage.log" 2>&1
+stale_stage_rc=$?
+set -e
+test "$stale_stage_rc" = 70
+grep -Fq "assignment manifest changed after controller precondition" \
+  "$work/image-smoke-stale-stage.log"
+test "$(sha256sum "$state/assignment.json" | awk '{print $1}')" = "$newer_fence_hash"
+
+python3 "$REPO_ROOT/tests/generate_machine_image_config.py" config \
+  --machine "$work/configured-machine.json" \
+  --token-sha256 "$token_hash" \
+  --output "$state/controller-input/machine-config.json" \
+  --sentinel "$work/configured-sentinel.json" \
+  --transition-kind rollback_prior \
+  --expected-machine "$work/configured-newer-machine.json" \
+  --expected-token-sha256 "$token_hash" \
+  --expected-state fenced
+docker exec "$configured" /opt/agora-venv/bin/python \
+  /opt/agora-image-runtime/agora_image_bootstrap.py \
+  > "$work/image-smoke-rollback.log" 2>&1
+rollback_hash="$(sha256sum "$state/assignment.json" | awk '{print $1}')"
+jq -e '.status == "ready" and
+  .assignmentTransition.kind == "rollback_prior" and
+  .assignmentTransition.state == "fenced" and
+  .assignmentTransition.rollbackAuthorized == true' \
+  "$state/bootstrap-receipt.json" >/dev/null
+rm "$state/bootstrap-receipt.json"
+docker exec "$configured" /opt/agora-venv/bin/python \
+  /opt/agora-image-runtime/agora_image_bootstrap.py \
+  > "$work/image-smoke-rollback-replay.log" 2>&1
+test "$(sha256sum "$state/assignment.json" | awk '{print $1}')" = "$rollback_hash"
+jq -e '.status == "ready" and
+  .assignmentTransition.kind == "rollback_prior" and
+  .assignmentTransition.idempotent == true' \
+  "$state/bootstrap-receipt.json" >/dev/null
+mv "$work/configured-stage-config.json" "$state/controller-input/machine-config.json"
+docker exec "$configured" /opt/agora-venv/bin/python \
+  /opt/agora-image-runtime/agora_image_bootstrap.py \
+  > "$work/image-smoke-restage.log" 2>&1
+jq -e '.status == "ready" and .assignmentTransition.state == "staged"' \
+  "$state/bootstrap-receipt.json" >/dev/null
+
+ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
+  set -Eeuo pipefail
   # Exercise the installed supervisor's exact outdated-client repair trigger
   # without joining Agora or touching a GPU.
   root=/workspace/agora-run
@@ -301,31 +370,32 @@ chmod 600 "$training_state/controller-input/hf-token" \
   "$training_state/controller-input/heartbeat-machine-secret"
 training_token_hash="$(sha256sum "$training_state/controller-input/hf-token" | awk '{print $1}')"
 jq -n \
-  --arg token_hash "$training_token_hash" \
   --arg runtime_fingerprint "$declared_runtime_fingerprint" \
   '{
-    schemaVersion:"agora.machine-image-config.v1",
-    machineId:"machine-training-smoke", provider:"runpod", accountScope:"account-training-smoke",
+    id:"machine-training-smoke", provider:"runpod", accountScope:"account-training-smoke",
     providerResourceId:"pod-training-smoke", tokenLabel:"training-smoke-user", tokenInstance:1,
     assignmentGeneration:1, assignmentOperationId:"assignment-operation-training-smoke",
     runId:"run-training-smoke", gpuModel:"NVIDIA RTX PRO 6000 Blackwell Server Edition",
-    nodeType:"tail", provisioningOrigin:"existing_rental",
+    agoraJoinRole:"tail", provisioningOrigin:"existing_rental",
     hostPort:49200, announcePort:55001, remoteRoot:"/workspace/agora-run",
-    tokenSha256:$token_hash, startTraining:true, px0Enabled:true,
-    assignmentTransition:{kind:"ready",allowAbsent:true,expectedManifest:null},
-    imageCapability:{contractVersion:"agora.machine-image-capability.v1",runtimeArtifactFingerprint:$runtime_fingerprint},
-    sentinel:{
-      mode:"local", url:"", timeoutSeconds:"invalid-fixture"
-    },
-    heartbeat:{
-      mode:"configured", url:"https://127.0.0.1:9/api/machine-heartbeat",
-      secretFile:"/workspace/agora-run/controller-input/heartbeat-machine-secret",
-      role:"tail", tokenLabel:"training-smoke-user",
-      runpodPodId:"pod-training-smoke", runpodDcId:"offline-fixture-dc",
-      intervalSeconds:1, jitterSeconds:0, timeoutSeconds:0.2
-    }
-  }' > "$training_state/controller-input/machine-config.json"
-chmod 600 "$training_state/controller-input/machine-config.json"
+    px0Enabled:true,
+    imageCapability:{contractVersion:"agora.machine-image-capability.v1",runtimeArtifactFingerprint:$runtime_fingerprint}
+  }' > "$work/training-machine.json"
+jq -n '{
+  url:"https://127.0.0.1:9/api/machine-heartbeat",
+  machineSecret:"heartbeat_fixture_secret_456",
+  role:"tail", tokenLabel:"training-smoke-user",
+  runpodPodId:"pod-training-smoke", runpodDcId:"offline-fixture-dc",
+  intervalSeconds:1, jitterSeconds:0, timeoutSeconds:0.2
+}' > "$work/training-heartbeat.json"
+python3 "$REPO_ROOT/tests/generate_machine_image_config.py" config \
+  --machine "$work/training-machine.json" \
+  --token-sha256 "$training_token_hash" \
+  --output "$training_state/controller-input/machine-config.json" \
+  --start-training \
+  --heartbeat "$work/training-heartbeat.json" \
+  --transition-kind ready \
+  --allow-absent
 cat > "$work/fake-agora-cli.py" <<'PY'
 import signal
 import time
@@ -369,7 +439,7 @@ ssh "${ssh_options[@]}" -p "$training_port" root@127.0.0.1 '
   jq -e '\''
     .status == "ready" and .training.requested == true and .training.status == "started" and
     .heartbeat.requested == true and .heartbeat.status == "started" and
-    .optional.sentinel.status == "unavailable" and
+    .optional.sentinel.status == "ready" and
     .optional.inspection.status == "unavailable" and
     .optional.px0.status == "blocked_by_inspection"
   '\'' "$root/bootstrap-receipt.json" >/dev/null
@@ -392,26 +462,33 @@ ssh "${ssh_options[@]}" -p "$training_port" root@127.0.0.1 '
   test -n "$third_pid"
   test "$third_pid" != "$second_pid"
   test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_gpu)" = 1
-  ! tmux has-session -t agora_sentinel 2>/dev/null
+  test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_sentinel)" = 1
   ! tmux has-session -t agora_px0 2>/dev/null
   grep -Fq "attempt=1 exit=17" "$root/progress.log"
-  cp -p "$root/controller-input/machine-config.json" /tmp/machine-config.ready-backup.json
-  jq --slurpfile current "$root/assignment.json" \
-    '\''.startTraining = false |
-      .assignmentTransition = {kind:"stage",allowAbsent:false,expectedManifest:$current[0]}'\'' \
-    /tmp/machine-config.ready-backup.json > "$root/controller-input/.machine-config.stage-replay.json"
-  chmod 600 "$root/controller-input/.machine-config.stage-replay.json"
-  mv "$root/controller-input/.machine-config.stage-replay.json" "$root/controller-input/machine-config.json"
-  /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
-    > /tmp/image-smoke-ready-stage-replay.log 2>&1
-  jq -e '\''.status == "ready" and
-    .assignmentTransition.kind == "stage" and
-    .assignmentTransition.state == "ready" and
-    .assignmentTransition.idempotent == true and
-    .training.status == "already_started"'\'' "$root/bootstrap-receipt.json" >/dev/null
-  test "$(ps -eo pid=,args= | awk '\''$2 == "/opt/agora-venv/bin/python" && $3 == "agora_cli.py" {print $1; exit}'\'')" = "$third_pid"
-  mv /tmp/machine-config.ready-backup.json "$root/controller-input/machine-config.json"
+  printf "%s\n" "$third_pid" > "$root/fake-running-pid"
 '
+cp -p "$training_state/controller-input/machine-config.json" "$work/training-ready-config.json"
+python3 "$REPO_ROOT/tests/generate_machine_image_config.py" config \
+  --machine "$work/training-machine.json" \
+  --token-sha256 "$training_token_hash" \
+  --output "$training_state/controller-input/machine-config.json" \
+  --heartbeat "$work/training-heartbeat.json" \
+  --transition-kind stage \
+  --expected-machine "$training_state/assignment.json" \
+  --expected-token-sha256 "$training_token_hash" \
+  --expected-state ready
+docker exec "$training" /opt/agora-venv/bin/python \
+  /opt/agora-image-runtime/agora_image_bootstrap.py \
+  > "$work/image-smoke-ready-stage-replay.log" 2>&1
+jq -e '.status == "ready" and
+  .assignmentTransition.kind == "stage" and
+  .assignmentTransition.state == "ready" and
+  .assignmentTransition.idempotent == true and
+  .training.status == "already_started"' \
+  "$training_state/bootstrap-receipt.json" >/dev/null
+test "$(docker exec "$training" sh -c 'ps -eo pid=,args= | awk '\''$2 == "/opt/agora-venv/bin/python" && $3 == "agora_cli.py" {print $1; exit}'\'')')" \
+  = "$(cat "$training_state/fake-running-pid")"
+mv "$work/training-ready-config.json" "$training_state/controller-input/machine-config.json"
 training_identity_hash="$(sha256sum "$training_state/private_gpu0.key" | awk '{print $1}')"
 for _ in $(seq 1 30); do
   if jq -e '.nextSeq >= 1' "$training_state/heartbeat-agent/state.json" >/dev/null 2>&1; then break; fi
