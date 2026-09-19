@@ -1,0 +1,138 @@
+{
+  "artifactFingerprint": "d8c24c8e7ad0f4e66610641868ece029473ba216a8438becc10daa9423205458",
+  "files": [
+    {
+      "kind": "generated_package_marker",
+      "path": "scripts/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "kind": "generated_package_marker",
+      "path": "scripts/agora_control/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "kind": "generated_package_marker",
+      "path": "scripts/agora_control/execution/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/agora_control/execution/assets.py",
+      "sha256": "738ef52393f7f927a47617680669c4fd93efefd40197e298838a521836f262a6",
+      "sourcePath": "scripts/agora_control/execution/assets.py",
+      "sourceSha256": "738ef52393f7f927a47617680669c4fd93efefd40197e298838a521836f262a6"
+    },
+    {
+      "kind": "renderer_dependency",
+      "path": "scripts/agora_control/fleet_read_model_bootstrap.py",
+      "sha256": "7925ef0d80b83cf9e63a3d06d9e63d45d470fd5755a23db4293d54d16dea20c4",
+      "sourcePath": "scripts/agora_control/fleet_read_model_bootstrap.py",
+      "sourceSha256": "7925ef0d80b83cf9e63a3d06d9e63d45d470fd5755a23db4293d54d16dea20c4"
+    },
+    {
+      "kind": "generated_package_marker",
+      "path": "scripts/agora_control/monitoring/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/agora_control/monitoring/remote_assets.py",
+      "sha256": "0486e1201330ba69b41d694e25d4bfcbfc41e50de3de60639a1747afb7875c3e",
+      "sourcePath": "scripts/agora_control/monitoring/remote_assets.py",
+      "sourceSha256": "0486e1201330ba69b41d694e25d4bfcbfc41e50de3de60639a1747afb7875c3e"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/agora_control/runtime_manifest.py",
+      "sha256": "15ed3e5b77fbbc5df075a13a65dd3a11a613d7557996d68f1742e4633e85e6ee",
+      "sourcePath": "scripts/agora_control/runtime_manifest.py",
+      "sourceSha256": "15ed3e5b77fbbc5df075a13a65dd3a11a613d7557996d68f1742e4633e85e6ee"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/agora_heartbeat_agent.py",
+      "sha256": "72e07d96655f1b95ac62e51e6197a42990b8004001362aef1e502a79a9423b7d",
+      "sourcePath": "scripts/agora_heartbeat_agent.py",
+      "sourceSha256": "72e07d96655f1b95ac62e51e6197a42990b8004001362aef1e502a79a9423b7d"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/agora_machine_sentinel_agent.py",
+      "sha256": "a000ace68d90380d837e89cea9d75c8773c82c154e79b2a2f42f1ce76ddbf04c",
+      "sourcePath": "scripts/agora_machine_sentinel_agent.py",
+      "sourceSha256": "a000ace68d90380d837e89cea9d75c8773c82c154e79b2a2f42f1ce76ddbf04c"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/machine_sentinel/__init__.py",
+      "sha256": "06eb12b7f7ae5454b49b6e9cd3bb260d0b1f6056e4cfa8e0dc4cc27ebc253ab0",
+      "sourcePath": "scripts/machine_sentinel/__init__.py",
+      "sourceSha256": "06eb12b7f7ae5454b49b6e9cd3bb260d0b1f6056e4cfa8e0dc4cc27ebc253ab0"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/machine_sentinel/client.py",
+      "sha256": "4da449df290a82bf107d0d651844f0724cfa4a79404f209a632fb41660ac58a2",
+      "sourcePath": "scripts/machine_sentinel/client.py",
+      "sourceSha256": "4da449df290a82bf107d0d651844f0724cfa4a79404f209a632fb41660ac58a2"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/machine_sentinel/event_spool.py",
+      "sha256": "19ca2f8153927cb4bb3a48266dba8942a2ba14843f6f9965f8993ea38db2d1de",
+      "sourcePath": "scripts/machine_sentinel/event_spool.py",
+      "sourceSha256": "19ca2f8153927cb4bb3a48266dba8942a2ba14843f6f9965f8993ea38db2d1de"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/machine_sentinel/evidence.py",
+      "sha256": "1758bb04f078fac3e39e309d314d06275523a8ecff00970bc03d5eb8a4ba04e0",
+      "sourcePath": "scripts/machine_sentinel/evidence.py",
+      "sourceSha256": "1758bb04f078fac3e39e309d314d06275523a8ecff00970bc03d5eb8a4ba04e0"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/machine_sentinel/observation_contract.py",
+      "sha256": "a1196d79e609293786f4d65e529210ad3eb0824243614efbfadf83146004c1c4",
+      "sourcePath": "scripts/machine_sentinel/observation_contract.py",
+      "sourceSha256": "a1196d79e609293786f4d65e529210ad3eb0824243614efbfadf83146004c1c4"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/machine_sentinel/process_contract.py",
+      "sha256": "d217f174f6afa3e3677e6f9abb213304117355a243eb204791ce4e89bf95e926",
+      "sourcePath": "scripts/machine_sentinel/process_contract.py",
+      "sourceSha256": "d217f174f6afa3e3677e6f9abb213304117355a243eb204791ce4e89bf95e926"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/machine_sentinel/sentinel.py",
+      "sha256": "ed5e55a5a7ecfce164968f6c555068bd1bf83d7773864a196df826727ab23184",
+      "sourcePath": "scripts/machine_sentinel/sentinel.py",
+      "sourceSha256": "ed5e55a5a7ecfce164968f6c555068bd1bf83d7773864a196df826727ab23184"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/machine_sentinel/state.py",
+      "sha256": "cc24d5ec2c0e8768b265319b7c016a1f589da7a53d286380dd8586923cbefcfd",
+      "sourcePath": "scripts/machine_sentinel/state.py",
+      "sourceSha256": "cc24d5ec2c0e8768b265319b7c016a1f589da7a53d286380dd8586923cbefcfd"
+    },
+    {
+      "kind": "source",
+      "path": "scripts/machine_sentinel/telemetry.py",
+      "sha256": "7f319013f90f4141b1b2de6a911b876c18ed7ce7221cd2130bf6c53f0bb73ad3",
+      "sourcePath": "scripts/machine_sentinel/telemetry.py",
+      "sourceSha256": "7f319013f90f4141b1b2de6a911b876c18ed7ce7221cd2130bf6c53f0bb73ad3"
+    }
+  ],
+  "schemaVersion": "agora.machine-runtime-export.v1",
+  "source": {
+    "artifactFingerprint": "981167f77459f758ed06d53eeb6f23d26c31d995fc4337cf87e01783befbcb46",
+    "commit": "63de15e1dcdb85b44681dc64f7a0c3dbc1faebfe",
+    "manifestPath": "runtime/machine-runtime-source.v1.json",
+    "manifestSha256": "de6f7c6d51bbfe65622ea2b3e1d983be770cece985176cc29ed46774d8f4943f",
+    "tree": "da1abf323b5850613655085a3bba10e389de37f2"
+  }
+}

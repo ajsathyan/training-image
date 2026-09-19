@@ -1,0 +1,9 @@
+**
+!Dockerfile
+!start.sh
+!image-runtime/
+!image-runtime/**
+!machine-runtime/
+!machine-runtime/**
+**/__pycache__/
+**/*.pyc
