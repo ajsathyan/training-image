@@ -323,7 +323,7 @@ docker exec "$configured" jq -e \
 
 ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   set -Eeuo pipefail
-  # Exercise the installed supervisor's exact outdated-client repair trigger
+  # Exercise the installed supervisor exact outdated-client repair trigger
   # without joining Agora or touching a GPU.
   root=/workspace/agora-run
   cp "$root/launch-agora-gpu0.sh" "$root/launch-agora-gpu0.sh.smoke-backup"
@@ -420,10 +420,13 @@ jq -n \
     id:"machine-training-smoke", provider:"runpod", accountScope:"account-training-smoke",
     providerResourceId:"pod-training-smoke", tokenLabel:"training-smoke-user", tokenInstance:1,
     assignmentGeneration:1, assignmentOperationId:"assignment-operation-training-smoke",
+    launchId:"launch-training-smoke", reservationId:"reservation-training-smoke",
+    slotId:"slot-training-smoke", slotGeneration:1,
+    machineGenerationId:"machine-generation-training-smoke",
     runId:"run-training-smoke", gpuModel:"NVIDIA RTX PRO 6000 Blackwell Server Edition",
     agoraJoinRole:"tail", provisioningOrigin:"existing_rental",
     hostPort:49200, announcePort:55001, remoteRoot:"/workspace/agora-run",
-    px0Enabled:true,
+    px0Enabled:true, fleetId:"fleet-training-smoke", authorityEpoch:5,
     imageCapability:{contractVersion:"agora.machine-image-capability.v1",runtimeArtifactFingerprint:$runtime_fingerprint}
   }' > "$work/training-machine.json"
 jq -n '{
