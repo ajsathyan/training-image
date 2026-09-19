@@ -134,6 +134,7 @@ configured_ready="$(date +%s)"
 
 ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   set -Eeuo pipefail
+  root=/workspace/agora-run
   test "$(cat /run/agora-image-bootstrap.status)" = 0
   jq -e '\''
     .schemaVersion == "agora.machine-image-bootstrap-receipt.v1" and
@@ -230,7 +231,7 @@ python3 "$REPO_ROOT/tests/generate_machine_image_config.py" manifest \
 cp "$work/configured-newer-fence.json" "$state/.assignment.newer.json"
 chmod 600 "$state/.assignment.newer.json"
 mv "$state/.assignment.newer.json" "$state/assignment.json"
-newer_fence_hash="$(sha256sum "$state/assignment.json" | awk '{print $1}')"
+newer_fence_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/assignment.json | awk '{print $1}')"
 set +e
 docker exec "$configured" /opt/agora-venv/bin/python \
   /opt/agora-image-runtime/agora_image_bootstrap.py \
@@ -240,7 +241,7 @@ set -e
 test "$stale_stage_rc" = 70
 grep -Fq "assignment manifest changed after controller precondition" \
   "$work/image-smoke-stale-stage.log"
-test "$(sha256sum "$state/assignment.json" | awk '{print $1}')" = "$newer_fence_hash"
+test "$(docker exec "$configured" sha256sum /workspace/agora-run/assignment.json | awk '{print $1}')" = "$newer_fence_hash"
 
 python3 "$REPO_ROOT/tests/generate_machine_image_config.py" config \
   --machine "$work/configured-machine.json" \
@@ -254,27 +255,28 @@ python3 "$REPO_ROOT/tests/generate_machine_image_config.py" config \
 docker exec "$configured" /opt/agora-venv/bin/python \
   /opt/agora-image-runtime/agora_image_bootstrap.py \
   > "$work/image-smoke-rollback.log" 2>&1
-rollback_hash="$(sha256sum "$state/assignment.json" | awk '{print $1}')"
-jq -e '.status == "ready" and
+rollback_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/assignment.json | awk '{print $1}')"
+docker exec "$configured" jq -e '.status == "ready" and
   .assignmentTransition.kind == "rollback_prior" and
   .assignmentTransition.state == "fenced" and
   .assignmentTransition.rollbackAuthorized == true' \
-  "$state/bootstrap-receipt.json" >/dev/null
-rm "$state/bootstrap-receipt.json"
+  /workspace/agora-run/bootstrap-receipt.json >/dev/null
+docker exec "$configured" rm /workspace/agora-run/bootstrap-receipt.json
 docker exec "$configured" /opt/agora-venv/bin/python \
   /opt/agora-image-runtime/agora_image_bootstrap.py \
   > "$work/image-smoke-rollback-replay.log" 2>&1
-test "$(sha256sum "$state/assignment.json" | awk '{print $1}')" = "$rollback_hash"
-jq -e '.status == "ready" and
+test "$(docker exec "$configured" sha256sum /workspace/agora-run/assignment.json | awk '{print $1}')" = "$rollback_hash"
+docker exec "$configured" jq -e '.status == "ready" and
   .assignmentTransition.kind == "rollback_prior" and
   .assignmentTransition.idempotent == true' \
-  "$state/bootstrap-receipt.json" >/dev/null
+  /workspace/agora-run/bootstrap-receipt.json >/dev/null
 mv "$work/configured-stage-config.json" "$state/controller-input/machine-config.json"
 docker exec "$configured" /opt/agora-venv/bin/python \
   /opt/agora-image-runtime/agora_image_bootstrap.py \
   > "$work/image-smoke-restage.log" 2>&1
-jq -e '.status == "ready" and .assignmentTransition.state == "staged"' \
-  "$state/bootstrap-receipt.json" >/dev/null
+docker exec "$configured" jq -e \
+  '.status == "ready" and .assignmentTransition.state == "staged"' \
+  /workspace/agora-run/bootstrap-receipt.json >/dev/null
 
 ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   set -Eeuo pipefail
@@ -347,14 +349,14 @@ test "$repaired_source_commit" != "71a44b894100baa8f2996b97e73ae0bd67fa6b9d"
 
 capability_hash="$(docker exec "$configured" sha256sum /opt/agora-image-runtime/capability.json | awk '{print $1}')"
 runtime_fingerprint="$(docker exec "$configured" jq -r .runtimeExport.artifactFingerprint /opt/agora-image-runtime/capability.json)"
-jq -e \
+docker exec "$configured" jq -e \
   --arg config "$config_hash" \
   --arg capability "$capability_hash" \
   --arg runtime "$runtime_fingerprint" \
   '.configSha256 == $config and .capabilitySha256 == $capability and
    .runtimeExport.artifactFingerprint == $runtime and
    .trainingSource.commit == "71a44b894100baa8f2996b97e73ae0bd67fa6b9d"' \
-  "$state/bootstrap-receipt.json" >/dev/null
+  /workspace/agora-run/bootstrap-receipt.json >/dev/null
 
 # A separate fresh container exercises the actual canonical start/watchdog/
 # supervisor path with a bounded offline Python process. It makes no Agora,
@@ -474,27 +476,28 @@ python3 "$REPO_ROOT/tests/generate_machine_image_config.py" config \
   --output "$training_state/controller-input/machine-config.json" \
   --heartbeat "$work/training-heartbeat.json" \
   --transition-kind stage \
-  --expected-machine "$training_state/assignment.json" \
+  --expected-machine "$work/training-machine.json" \
   --expected-token-sha256 "$training_token_hash" \
   --expected-state ready
 docker exec "$training" /opt/agora-venv/bin/python \
   /opt/agora-image-runtime/agora_image_bootstrap.py \
   > "$work/image-smoke-ready-stage-replay.log" 2>&1
-jq -e '.status == "ready" and
+docker exec "$training" jq -e '.status == "ready" and
   .assignmentTransition.kind == "stage" and
   .assignmentTransition.state == "ready" and
   .assignmentTransition.idempotent == true and
   .training.status == "already_started"' \
-  "$training_state/bootstrap-receipt.json" >/dev/null
+  /workspace/agora-run/bootstrap-receipt.json >/dev/null
 test "$(docker exec "$training" sh -c 'ps -eo pid=,args= | awk '\''$2 == "/opt/agora-venv/bin/python" && $3 == "agora_cli.py" {print $1; exit}'\'')')" \
-  = "$(cat "$training_state/fake-running-pid")"
+  = "$(docker exec "$training" cat /workspace/agora-run/fake-running-pid)"
 mv "$work/training-ready-config.json" "$training_state/controller-input/machine-config.json"
-training_identity_hash="$(sha256sum "$training_state/private_gpu0.key" | awk '{print $1}')"
+training_identity_hash="$(docker exec "$training" sha256sum /workspace/agora-run/private_gpu0.key | awk '{print $1}')"
 for _ in $(seq 1 30); do
-  if jq -e '.nextSeq >= 1' "$training_state/heartbeat-agent/state.json" >/dev/null 2>&1; then break; fi
+  if docker exec "$training" jq -e '.nextSeq >= 1' \
+    /workspace/agora-run/heartbeat-agent/state.json >/dev/null 2>&1; then break; fi
   sleep 1
 done
-heartbeat_seq_before="$(jq -r .nextSeq "$training_state/heartbeat-agent/state.json")"
+heartbeat_seq_before="$(docker exec "$training" jq -r .nextSeq /workspace/agora-run/heartbeat-agent/state.json)"
 docker exec "$training" rm -f /run/agora-image-bootstrap.status
 docker restart "$training" >/dev/null
 wait_for_ssh "$training_port"
@@ -513,9 +516,9 @@ ssh "${ssh_options[@]}" -p "$training_port" root@127.0.0.1 '
   test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_gpu)" = 1
   test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_heartbeat)" = 1
 '
-test "$(sha256sum "$training_state/private_gpu0.key" | awk '{print $1}')" = "$training_identity_hash"
+test "$(docker exec "$training" sha256sum /workspace/agora-run/private_gpu0.key | awk '{print $1}')" = "$training_identity_hash"
 for _ in $(seq 1 30); do
-  heartbeat_seq_after="$(jq -r .nextSeq "$training_state/heartbeat-agent/state.json")"
+  heartbeat_seq_after="$(docker exec "$training" jq -r .nextSeq /workspace/agora-run/heartbeat-agent/state.json)"
   if test "$heartbeat_seq_after" -gt "$heartbeat_seq_before"; then break; fi
   sleep 1
 done
@@ -542,7 +545,7 @@ for _ in $(seq 1 30); do
   if curl -fsS "http://127.0.0.1:$tunnel_port/api/meta" > "$work/px0-meta.json"; then break; fi
   sleep 1
 done
-jq -e '.name == "inspection"' "$work/px0-meta.json" >/dev/null
+jq -e '.name == "agora-inspection"' "$work/px0-meta.json" >/dev/null
 for _ in $(seq 1 30); do
   if curl -fsS "http://127.0.0.1:$tunnel_port/api/raw?path=progress.log" \
     > "$work/px0-progress.log" \
@@ -575,13 +578,15 @@ kill "$tunnel_pid"
 tunnel_pid=""
 
 for _ in $(seq 1 20); do
-  if test -s "$state/machine-sentinel/events.jsonl"; then break; fi
+  if docker exec "$configured" test -s \
+    /workspace/agora-run/machine-sentinel/events.jsonl; then break; fi
   sleep 1
 done
-test -s "$state/machine-sentinel/events.jsonl"
-events_hash="$(sha256sum "$state/machine-sentinel/events.jsonl" | awk '{print $1}')"
-cp "$state/machine-sentinel/events.jsonl" "$work/events-before-restart.jsonl"
-receipt_hash="$(sha256sum "$state/bootstrap-receipt.json" | awk '{print $1}')"
+docker exec "$configured" test -s /workspace/agora-run/machine-sentinel/events.jsonl
+events_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/machine-sentinel/events.jsonl | awk '{print $1}')"
+docker exec "$configured" cat /workspace/agora-run/machine-sentinel/events.jsonl \
+  > "$work/events-before-restart.jsonl"
+receipt_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/bootstrap-receipt.json | awk '{print $1}')"
 
 docker exec "$configured" rm -f /run/agora-image-bootstrap.status
 docker restart "$configured" >/dev/null
@@ -596,9 +601,12 @@ ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
     .runtimeTrainingSource.status == "approved_repair"'\'' /workspace/agora-run/bootstrap-receipt.json >/dev/null
 '
 test "$(docker exec "$configured" git -C /opt/agora-source rev-parse HEAD)" = "$repaired_source_commit"
-test -s "$state/machine-sentinel/events.jsonl"
-cmp -n "$(stat -c %s "$work/events-before-restart.jsonl")" \
-  "$work/events-before-restart.jsonl" "$state/machine-sentinel/events.jsonl"
+docker exec "$configured" test -s /workspace/agora-run/machine-sentinel/events.jsonl
+events_prefix_size="$(wc -c < "$work/events-before-restart.jsonl" | tr -d '[:space:]')"
+docker exec "$configured" head -c "$events_prefix_size" \
+  /workspace/agora-run/machine-sentinel/events.jsonl \
+  > "$work/events-after-restart-prefix.jsonl"
+cmp "$work/events-before-restart.jsonl" "$work/events-after-restart-prefix.jsonl"
 test -n "$events_hash"
 test -n "$receipt_hash"
 

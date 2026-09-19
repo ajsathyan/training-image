@@ -752,6 +752,48 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
             self.assertEqual(persisted, newer)
             self.assertEqual(failed_receipt["status"], "failed")
 
+    def test_postcommit_start_failure_keeps_target_and_exact_retry_finishes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace" / "agora-run"
+            target_machine = production_machine(
+                root, generation=5, operation="assignment-target"
+            )
+            target = production_config(
+                target_machine, "target-token", kind="ready", expected=None
+            )
+            with self.assertRaises(subprocess.CalledProcessError):
+                self._invoke(
+                    root,
+                    target,
+                    "target-token",
+                    fail_install=True,
+                )
+            first = (root / "assignment.json").read_bytes()
+            failed_receipt = json.loads(
+                (root / "bootstrap-receipt.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(failed_receipt["status"], "failed")
+            self.assertEqual(json.loads(first)["state"], "ready")
+
+            self.assertEqual(
+                self._invoke(
+                    root,
+                    target,
+                    "target-token",
+                    gpu_session=True,
+                ),
+                0,
+            )
+            receipt = json.loads(
+                (root / "bootstrap-receipt.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual((root / "assignment.json").read_bytes(), first)
+            self.assertEqual(receipt["status"], "ready")
+            self.assertTrue(receipt["assignmentTransition"]["idempotent"])
+            self.assertEqual(receipt["training"]["status"], "started")
+
     def test_rollback_lost_ack_replay_is_identical_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "workspace" / "agora-run"
