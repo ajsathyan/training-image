@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import stat
 import time
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from typing import Any, Iterator
 SCHEMA_VERSION = 1
 STATES = {"fenced", "staged", "ready"}
 KINDS = {"stage", "ready", "rollback_prior"}
+IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 BINDING_KEYS = (
     "schemaVersion",
     "operationId",
@@ -54,13 +57,30 @@ def _validate_manifest(value: Any, *, label: str) -> dict[str, Any]:
         raise AssignmentTransitionError(f"{label} is invalid")
     if value.get("schemaVersion") != SCHEMA_VERSION:
         raise AssignmentTransitionError(f"{label} has unsupported schema")
-    if not isinstance(value.get("assignmentGeneration"), int) or isinstance(
-        value.get("assignmentGeneration"), bool
-    ):
-        raise AssignmentTransitionError(f"{label} has invalid generation")
     for key in BINDING_KEYS:
         if key not in value:
             raise AssignmentTransitionError(f"{label} is missing {key}")
+    for key in ("assignmentGeneration", "tokenInstance"):
+        if (
+            not isinstance(value.get(key), int)
+            or isinstance(value.get(key), bool)
+            or value[key] < 1
+        ):
+            raise AssignmentTransitionError(f"{label} has invalid {key}")
+    for key in (
+        "operationId",
+        "tokenLabel",
+        "machineId",
+        "provider",
+        "accountScope",
+        "providerResourceId",
+    ):
+        if not isinstance(value.get(key), str) or not IDENTIFIER.fullmatch(value[key]):
+            raise AssignmentTransitionError(f"{label} has invalid {key}")
+    if not isinstance(value.get("tokenSha256"), str) or not SHA256.fullmatch(
+        value["tokenSha256"]
+    ):
+        raise AssignmentTransitionError(f"{label} has invalid tokenSha256")
     return {key: value[key] for key in (*BINDING_KEYS, "state")}
 
 
@@ -165,6 +185,7 @@ def _transition_decision(
         raise AssignmentTransitionError("assignmentTransition is missing or invalid")
     kind = str(transition["kind"])
     requested = assignment_binding(config)
+    _validate_manifest({**requested, "state": "staged"}, label="requested assignment")
     expected_raw = transition.get("expectedManifest")
     expected = (
         None
@@ -192,7 +213,19 @@ def _transition_decision(
     same = _same_binding(current, requested)
     if same:
         if kind == "rollback_prior":
-            raise AssignmentTransitionError("rollback must target a prior assignment")
+            if current["state"] != "fenced":
+                raise AssignmentTransitionError(
+                    "rollback replay must remain exactly fenced"
+                )
+            return AssignmentTransition(
+                root=Path(config["remoteRoot"]),
+                requested=requested,
+                kind=kind,
+                current=current,
+                target_state="fenced",
+                rollback_authorized=True,
+                idempotent=True,
+            )
         allowed_states = (
             {"fenced", "staged", "ready"} if kind == "stage" else {"staged", "ready"}
         )
@@ -271,3 +304,23 @@ def assignment_transition(
         finally:
             # Child guards may start only after this context releases the lock.
             pass
+
+
+def verify_assignment_postcondition(
+    root: Path, config: dict[str, Any], *, required_state: str
+) -> dict[str, Any]:
+    """Recheck the exact committed binding under the canonical lock."""
+    if required_state not in STATES:
+        raise AssignmentTransitionError("assignment postcondition state is invalid")
+    with _assignment_lock(root):
+        current = _read_manifest(root / "assignment.json")
+        requested = assignment_binding(config)
+        if (
+            current is None
+            or current.get("state") != required_state
+            or not _same_binding(current, requested)
+        ):
+            raise AssignmentTransitionError(
+                "assignment postcondition was replaced or is incomplete"
+            )
+        return current

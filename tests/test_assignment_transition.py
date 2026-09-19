@@ -89,6 +89,28 @@ class AssignmentTransitionTests(unittest.TestCase):
                 stat.S_IMODE((root / "assignment.json").stat().st_mode), 0o600
             )
             self.assertFalse((root / "assignment.lock").exists())
+            verified = transition.verify_assignment_postcondition(
+                root, ready_config, required_state="ready"
+            )
+            self.assertEqual(verified["operationId"], "operation-1")
+
+            with transition.assignment_transition(root, staged_config) as delayed_stage:
+                self.assertTrue(delayed_stage.idempotent)
+                self.assertEqual(delayed_stage.target_state, "ready")
+                delayed_stage.commit()
+            self.assertEqual(
+                json.loads((root / "assignment.json").read_text())["state"],
+                "ready",
+            )
+
+            newer = config(root, generation=2, operation="operation-2")
+            write_manifest(root, manifest(newer, "fenced"))
+            with self.assertRaisesRegex(
+                transition.AssignmentTransitionError, "postcondition"
+            ):
+                transition.verify_assignment_postcondition(
+                    root, ready_config, required_state="ready"
+                )
 
     def test_concurrent_newer_fence_rejects_stale_absent_precondition(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

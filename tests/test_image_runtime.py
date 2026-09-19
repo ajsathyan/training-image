@@ -308,9 +308,49 @@ class ImageBootstrapContractTests(unittest.TestCase):
                     root, prior, rollback_authorized=decision.rollback_authorized
                 )
                 retained = bootstrap._check_private_identity(root, prior)
+                source = root / "source"
+                source.mkdir()
+                original_source = bootstrap.TRAINING_SOURCE
+                bootstrap.TRAINING_SOURCE = source
+                repaired_commit = "2" * 40
+                build_commit = "1" * 40
+                machine = json.loads(
+                    (root / "machine.json").read_text(encoding="utf-8")
+                )
+                machine["agoraCommit"] = repaired_commit
+                (root / "machine.json").write_text(
+                    json.dumps(machine), encoding="utf-8"
+                )
+                repair_marker = {
+                    "schemaVersion": "agora.client-repair-provenance.v1",
+                    "beforeCommit": build_commit,
+                    "afterCommit": repaired_commit,
+                    "machineId": prior["machineId"],
+                    "provider": prior["provider"],
+                    "accountScope": prior["accountScope"],
+                    "providerResourceId": prior["providerResourceId"],
+                    "assignmentGeneration": prior["assignmentGeneration"],
+                    "assignmentOperationId": prior["assignmentOperationId"],
+                    "sourcePath": str(source.resolve()),
+                }
+                repair_path = root / "agora-client-repair-provenance.json"
+                repair_path.write_text(json.dumps(repair_marker), encoding="utf-8")
+                repair_path.chmod(0o600)
+                try:
+                    provenance = bootstrap._runtime_training_provenance(
+                        root,
+                        prior,
+                        {"trainingSource": {"commit": build_commit}},
+                        repaired_commit,
+                        current_assignment=decision.current,
+                        rollback_authorized=decision.rollback_authorized,
+                    )
+                finally:
+                    bootstrap.TRAINING_SOURCE = original_source
                 restored = decision.commit()
 
             self.assertEqual(retained["status"], "verified_existing")
+            self.assertEqual(provenance["status"], "approved_repair")
             self.assertEqual(restored["assignmentGeneration"], 4)
             self.assertEqual(restored["state"], "fenced")
 

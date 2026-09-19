@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from assignment_transition import (  # noqa: E402
     AssignmentTransitionError,
     assignment_transition,
+    verify_assignment_postcondition,
 )
 
 
@@ -422,6 +423,9 @@ def _runtime_training_provenance(
     config: dict[str, Any],
     capability: dict[str, Any],
     commit: str,
+    *,
+    current_assignment: dict[str, Any] | None = None,
+    rollback_authorized: bool = False,
 ) -> dict[str, Any]:
     build_commit = str(capability.get("trainingSource", {}).get("commit") or "")
     if not re.fullmatch(r"[0-9a-f]{40}", build_commit):
@@ -452,16 +456,34 @@ def _runtime_training_provenance(
         "assignmentGeneration": config["assignmentGeneration"],
         "assignmentOperationId": config["assignmentOperationId"],
     }
+    machine_binding = binding
+    allowed_marker_bindings = [binding]
+    if rollback_authorized:
+        if not isinstance(current_assignment, dict):
+            raise BootstrapError("rollback repair provenance has no current assignment")
+        machine_binding = {
+            "machineId": current_assignment["machineId"],
+            "provider": current_assignment["provider"],
+            "accountScope": current_assignment["accountScope"],
+            "providerResourceId": current_assignment["providerResourceId"],
+            "assignmentGeneration": current_assignment["assignmentGeneration"],
+            "assignmentOperationId": current_assignment["operationId"],
+        }
+        allowed_marker_bindings.append(machine_binding)
+    marker_matches_assignment = isinstance(marker, dict) and any(
+        all(marker.get(key) == value for key, value in candidate.items())
+        for candidate in allowed_marker_bindings
+    )
     if (
         not isinstance(marker, dict)
         or marker.get("schemaVersion") != "agora.client-repair-provenance.v1"
         or marker.get("afterCommit") != commit
         or marker.get("sourcePath") != str(TRAINING_SOURCE.resolve())
         or not re.fullmatch(r"[0-9a-f]{40}", str(marker.get("beforeCommit") or ""))
-        or any(marker.get(key) != value for key, value in binding.items())
+        or not marker_matches_assignment
         or not isinstance(machine, dict)
         or machine.get("agoraCommit") != commit
-        or any(machine.get(key) != value for key, value in binding.items())
+        or any(machine.get(key) != value for key, value in machine_binding.items())
     ):
         raise BootstrapError("approved repair provenance does not bind runtime source")
     return {
@@ -1018,8 +1040,18 @@ def main() -> int:
         root.mkdir(parents=True, exist_ok=True)
         _source, commit = _verify_baked_training_source()
         with assignment_transition(root, normalized) as transition:
+            preserved_ready = (
+                transition.kind == "stage"
+                and transition.idempotent
+                and transition.target_state == "ready"
+            )
             runtime_training_source = _runtime_training_provenance(
-                root, normalized, capability, commit
+                root,
+                normalized,
+                capability,
+                commit,
+                current_assignment=transition.current,
+                rollback_authorized=transition.rollback_authorized,
             )
             _check_existing_identity(
                 root,
@@ -1027,15 +1059,16 @@ def main() -> int:
                 rollback_authorized=transition.rollback_authorized,
             )
             identity = _check_private_identity(root, normalized)
-            _materialize_state(root, normalized, token, commit)
-            _render_training_assets(root, normalized, assets)
+            if not preserved_ready:
+                _materialize_state(root, normalized, token, commit)
+                _render_training_assets(root, normalized, assets)
             assignment_manifest = transition.commit()
         training = {
             "requested": normalized["startTraining"],
             "status": (
                 "fenced"
                 if normalized["assignmentTransition"]["kind"] == "rollback_prior"
-                else "staged"
+                else ("already_started" if preserved_ready else "staged")
             ),
         }
         if normalized["startTraining"]:
@@ -1053,23 +1086,75 @@ def main() -> int:
             ):
                 raise BootstrapError("training supervisor did not start")
             training["status"] = "started"
-        heartbeat = _heartbeat(root, normalized, assets)
-        inspection = _record_optional(
-            root, "inspection", lambda: _refresh_inspection(root, capability)
-        )
-        if not normalized["px0Enabled"]:
-            px0 = {"status": "disabled"}
-        elif inspection["status"] != "ready":
-            px0 = {"status": "blocked_by_inspection"}
+        if preserved_ready:
+            heartbeat = {
+                "requested": normalized["heartbeat"]["mode"] == "configured",
+                "status": (
+                    "started"
+                    if normalized["heartbeat"]["mode"] == "configured"
+                    and subprocess.run(
+                        ["tmux", "has-session", "-t", "agora_heartbeat"],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    ).returncode
+                    == 0
+                    else (
+                        "disabled"
+                        if normalized["heartbeat"]["mode"] == "disabled"
+                        else "staged"
+                    )
+                ),
+            }
+            optional = {
+                name: {"status": "preserved"}
+                for name in ("sentinel", "inspection", "px0")
+            }
         else:
-            px0 = _record_optional(root, "px0", lambda: _px0(root, True, capability))
-        optional = {
-            "sentinel": _record_optional(
-                root, "sentinel", lambda: _sentinel(root, normalized, remote_assets)
-            ),
-            "inspection": inspection,
-            "px0": px0,
-        }
+            heartbeat = _heartbeat(root, normalized, assets)
+            inspection = _record_optional(
+                root, "inspection", lambda: _refresh_inspection(root, capability)
+            )
+            if not normalized["px0Enabled"]:
+                px0 = {"status": "disabled"}
+            elif inspection["status"] != "ready":
+                px0 = {"status": "blocked_by_inspection"}
+            else:
+                px0 = _record_optional(
+                    root, "px0", lambda: _px0(root, True, capability)
+                )
+            optional = {
+                "sentinel": _record_optional(
+                    root, "sentinel", lambda: _sentinel(root, normalized, remote_assets)
+                ),
+                "inspection": inspection,
+                "px0": px0,
+            }
+        transition_kind = normalized["assignmentTransition"]["kind"]
+        required_state = assignment_manifest["state"]
+        if required_state in {"staged", "fenced"} and (
+            subprocess.run(
+                ["tmux", "has-session", "-t", "agora_gpu"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            == 0
+        ):
+            raise BootstrapError(
+                f"{transition_kind} postcondition requires stopped training"
+            )
+        if required_state == "ready" and (
+            subprocess.run(
+                ["tmux", "has-session", "-t", "agora_gpu"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            != 0
+        ):
+            raise BootstrapError("ready postcondition requires supervised training")
+        verify_assignment_postcondition(root, normalized, required_state=required_state)
         _write_receipt(
             receipt_path,
             {
