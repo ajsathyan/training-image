@@ -481,7 +481,16 @@ def refresh_local_evidence(sentinel: MachineSentinel, root: Path, observed_at: s
             observed_at=observed_at,
         )
     session = runner(
-        ["tmux", "display-message", "-p", "-t", "agora_gpu", "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{session_created}"],
+        [
+            "tmux",
+            "list-panes",
+            "-t",
+            "=agora_gpu:",
+            "-f",
+            "#{pane_active}",
+            "-F",
+            "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{session_created}",
+        ],
         text=True,
         capture_output=True,
         timeout=5,

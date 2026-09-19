@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-DEFAULT_SOURCE_COMMIT = "79d3f7dbec912d972f57a9e133eb5dd62714d609"
+DEFAULT_SOURCE_COMMIT = "becf930c74e00b30c096fe7f009dabc694ad42b1"
 SOURCE_MANIFEST_PATH = "runtime/machine-runtime-source.v1.json"
 RENDERER_DEPENDENCY = "scripts/agora_control/fleet_read_model_bootstrap.py"
 PACKAGE_MARKERS = (
