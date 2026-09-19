@@ -28,6 +28,8 @@ LABEL io.agora.image.platform="linux/amd64" \
       io.agora.px0.version="${PX0_VERSION}" \
       io.agora.px0.sha256="${PX0_SHA256}"
 
+COPY image-repair-build-requirements.txt /tmp/image-repair-build-requirements.txt
+
 RUN test "$TARGETARCH" = "amd64" \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -47,6 +49,22 @@ RUN test "$TARGETARCH" = "amd64" \
     && useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin agora-inspection \
     && rm -rf /var/lib/apt/lists/* \
     && /opt/agora-venv/bin/python -c 'import sys, torch; assert sys.version_info[:2] == (3, 13), sys.version; assert torch.__version__.startswith("2.11."), torch.__version__'
+
+# The canonical Fleet repair path intentionally uses pip --no-build-isolation.
+# Keep its build backend and editable-wheel helper in the runtime interpreter;
+# the isolated uv builds below do not make those packages available at runtime.
+RUN /opt/agora-venv/bin/uv pip install --python /opt/agora-venv/bin/python \
+        --no-deps --require-hashes -r /tmp/image-repair-build-requirements.txt \
+    && /opt/agora-venv/bin/python - <<'PY'
+import importlib.metadata
+
+import editables
+import grpc_tools
+import hatchling.build
+
+assert importlib.metadata.version("hatchling") == "1.27.0"
+assert importlib.metadata.version("editables") == "0.5"
+PY
 
 RUN git clone --filter=blob:none --no-checkout "$TRAINING_REPO_URL" /opt/agora-source \
     && git -C /opt/agora-source fetch --depth 1 origin "$TRAINING_REPO_REF" \

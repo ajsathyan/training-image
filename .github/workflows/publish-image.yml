@@ -6,6 +6,7 @@ on:
     paths:
       - Dockerfile
       - .dockerignore
+      - image-repair-build-requirements.txt
       - start.sh
       - machine-sentinel/**
       - image-runtime/**
@@ -19,6 +20,7 @@ on:
     paths:
       - Dockerfile
       - .dockerignore
+      - image-repair-build-requirements.txt
       - start.sh
       - machine-sentinel/**
       - image-runtime/**

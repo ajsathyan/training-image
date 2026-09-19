@@ -1,5 +1,6 @@
 **
 !Dockerfile
+!image-repair-build-requirements.txt
 !start.sh
 !image-runtime/
 !image-runtime/**

@@ -16,10 +16,12 @@ build and run fresh-container tests without pushing. Merges to `main` publish
 - fleet runtime: `ajsathyan/agora-runpod@7ff63e5ed211804d92aa94a17251625f90519061`
 - fleet source tree: `9481feef793d9aebac96522efe9139752ed5c549`
 - px0: `v0.1.6`, verified by the SHA-256 in `Dockerfile`
+- in-place repair build tooling: exact wheel hashes in
+  `image-repair-build-requirements.txt`
 
 The build verifies those identities, the runtime manifest, Python 3.13/PyTorch
-2.11, and the installed Agora import paths. Normal boot does not clone, fetch,
-pull, or run pip.
+2.11, the canonical repair backend imports, and the installed Agora import
+paths. Normal boot does not clone, fetch, pull, or run pip.
 
 ## Machine-image contract
 
