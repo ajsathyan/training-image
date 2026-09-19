@@ -238,11 +238,13 @@ PY
   kill -0 "$orphan_pid"
   mv /tmp/run_server.py.image-smoke-backup "$server_path"
   assignment_before="$(sha256sum "$root/assignment.json" | awk '\''{print $1}'\'')"
-  set +e
-  /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
-    > /tmp/image-smoke-orphan-bootstrap.log 2>&1
-  orphan_bootstrap_rc=$?
-  set -e
+  orphan_bootstrap_rc=0
+  if /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
+    > /tmp/image-smoke-orphan-bootstrap.log 2>&1; then
+    :
+  else
+    orphan_bootstrap_rc=$?
+  fi
   test "$orphan_bootstrap_rc" = 70
   grep -Fq "owned Agora process is still running" /tmp/image-smoke-orphan-bootstrap.log
   test "$(sha256sum "$root/assignment.json" | awk '\''{print $1}'\'')" = "$assignment_before"
