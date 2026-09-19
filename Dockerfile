@@ -52,10 +52,15 @@ RUN git clone --filter=blob:none --no-checkout "$TRAINING_REPO_URL" /opt/agora-s
     && git -C /opt/agora-source fetch --depth 1 origin "$TRAINING_REPO_REF" \
     && git -C /opt/agora-source checkout --detach "$TRAINING_REPO_REF" \
     && test "$(git -C /opt/agora-source rev-parse HEAD)" = "$TRAINING_REPO_REF" \
-    && /opt/agora-venv/bin/python -m pip install --no-build-isolation --no-deps \
-        -e /opt/agora-source/pithos \
-        -e /opt/agora-source/agora_server \
-        -e /opt/agora-source/agora \
+    && cd /opt/agora-source/pithos \
+    && /opt/agora-venv/bin/uv pip install --python /opt/agora-venv/bin/python \
+        --no-deps --build-constraint ../constraints.txt -e . \
+    && cd /opt/agora-source/agora_server \
+    && /opt/agora-venv/bin/uv pip install --python /opt/agora-venv/bin/python \
+        --no-deps -e . \
+    && cd /opt/agora-source/agora \
+    && /opt/agora-venv/bin/uv pip install --python /opt/agora-venv/bin/python \
+        --no-deps --build-constraint ../constraints.txt -e . \
     && /opt/agora-venv/bin/python - <<'PY'
 import pathlib
 import agora
