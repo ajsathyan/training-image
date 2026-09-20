@@ -771,9 +771,38 @@ def _sentinel(root: Path, config: dict[str, Any], remote_assets: Any) -> None:
         raise BootstrapError("sentinel remote configuration is incomplete")
     sentinel_fleet_id = sentinel.get("fleetId")
     sentinel_authority_epoch = sentinel.get("authorityEpoch")
+    machine_fleet_id = config.get("fleetId")
+    machine_authority_epoch = config.get("authorityEpoch")
+    if (
+        sentinel_fleet_id is not None
+        and machine_fleet_id is not None
+        and sentinel_fleet_id != machine_fleet_id
+    ):
+        raise BootstrapError("sentinel fleetId conflicts with machine fleetId")
     if mode == "remote":
         sentinel_fleet_id = _identifier(sentinel, "fleetId")
         sentinel_authority_epoch = _positive_int(sentinel, "authorityEpoch")
+        if (
+            machine_authority_epoch is not None
+            and sentinel_authority_epoch
+            != _positive_int(config, "authorityEpoch")
+        ):
+            raise BootstrapError(
+                "sentinel authorityEpoch conflicts with machine authorityEpoch"
+            )
+    else:
+        if machine_authority_epoch is None:
+            raise BootstrapError(
+                "sentinel local configuration requires machine authorityEpoch"
+            )
+        machine_authority_epoch = _positive_int(config, "authorityEpoch")
+        if sentinel_authority_epoch is not None:
+            nested_authority_epoch = _positive_int(sentinel, "authorityEpoch")
+            if nested_authority_epoch != machine_authority_epoch:
+                raise BootstrapError(
+                    "sentinel authorityEpoch conflicts with machine authorityEpoch"
+                )
+        sentinel_authority_epoch = machine_authority_epoch
     settings = {
         "url": url,
         "exportEnabled": mode == "remote",
