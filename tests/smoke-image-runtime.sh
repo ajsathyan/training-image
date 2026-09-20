@@ -333,9 +333,17 @@ ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   printf "%s\n" fixture-private-key > "$root/private_gpu0.key"
   chmod 600 "$root/private_gpu0.key"
   rm -rf /tmp/agora-repair-fixture
-  git clone -q /opt/agora-source /tmp/agora-repair-fixture
+  mkdir -m 700 /tmp/agora-repair-fixture
+  GIT_NO_LAZY_FETCH=1 git -C /opt/agora-source archive HEAD \
+    | tar -x -C /tmp/agora-repair-fixture
+  test -f /tmp/agora-repair-fixture/pithos/pyproject.toml
+  test -f /tmp/agora-repair-fixture/agora_server/pyproject.toml
+  test -f /tmp/agora-repair-fixture/agora/pyproject.toml
+  git -C /tmp/agora-repair-fixture init -q
   git -C /tmp/agora-repair-fixture config user.name "Agora image smoke"
   git -C /tmp/agora-repair-fixture config user.email "image-smoke@example.invalid"
+  git -C /tmp/agora-repair-fixture add -A
+  git -C /tmp/agora-repair-fixture commit -q -m "test: offline repair base"
   printf "%s\n" "offline repair fixture" > /tmp/agora-repair-fixture/.agora-image-smoke-repair
   git -C /tmp/agora-repair-fixture add .agora-image-smoke-repair
   git -C /tmp/agora-repair-fixture commit -q -m "test: offline repair fixture"
@@ -349,6 +357,7 @@ SH
   chmod 700 "$root/launch-agora-gpu0.sh"
   tmux new-session -d -s agora_gpu \
     -e "AGORA_REPAIR_REPO_URL=file:///tmp/agora-repair-fixture" \
+    -e "GIT_NO_LAZY_FETCH=1" \
     "$root/supervise-agora-gpu0.sh"
   for _ in $(seq 1 20); do
     if test -f "$root/logs/launcher-active.log"; then break; fi
