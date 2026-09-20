@@ -86,10 +86,14 @@ def _decode_launch(environment: Mapping[str, str]) -> dict[str, Any]:
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
-    if not path.is_file() or path.is_symlink():
+    try:
+        if not path.is_file() or path.is_symlink():
+            return {}
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
         return {}
     values: dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for raw in lines:
         line = raw.strip()
         if line.startswith("export "):
             line = line[7:].strip()

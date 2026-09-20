@@ -118,6 +118,12 @@ class BootStartTests(unittest.TestCase):
             thread.join()
         self.assertEqual(result, ("pod-delayed", 35555))
 
+    def test_unreadable_optional_provider_file_is_skipped(self) -> None:
+        with mock.patch.object(
+            Path, "is_file", side_effect=PermissionError("not readable")
+        ):
+            self.assertEqual(boot._parse_env_file(Path("/root/provider.env")), {})
+
     def test_public_training_port_is_never_inferred_from_ssh(self) -> None:
         with mock.patch.object(
             boot,
