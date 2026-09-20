@@ -555,6 +555,7 @@ done
 heartbeat_seq_before="$(docker exec "$training" jq -r .nextSeq /workspace/agora-run/heartbeat-agent/state.json)"
 docker exec "$training" rm -f /run/agora-image-bootstrap.status
 docker restart "$training" >/dev/null
+training_port="$(host_port "$training")"
 wait_for_ssh "$training_port"
 wait_for_bootstrap "$training"
 ssh "${ssh_options[@]}" -p "$training_port" root@127.0.0.1 '
@@ -645,6 +646,7 @@ receipt_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/bootstr
 
 docker exec "$configured" rm -f /run/agora-image-bootstrap.status
 docker restart "$configured" >/dev/null
+configured_port="$(host_port "$configured")"
 wait_for_ssh "$configured_port"
 wait_for_bootstrap "$configured"
 ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
