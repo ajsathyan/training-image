@@ -47,7 +47,7 @@ capture_failure() {
       /workspace/agora-run/logs/server_gpu0.log \
       /workspace/agora-run/logs/launcher-gpu0.log \
       /workspace/agora-run/logs/launcher-active.log; do
-      if test -f "$path"; then printf "-- %s --\n" "$path"; tail -n 120 "$path"; fi
+      if test -f "$path"; then printf "%s\n" "-- $path --"; tail -n 120 "$path"; fi
     done
   ' 2>&1 \
     | sed -E 's/(hf_|heartbeat_fixture_|sentinel_fixture_)[A-Za-z0-9_.:-]+/[REDACTED]/g' \
@@ -630,8 +630,10 @@ ssh "${ssh_options[@]}" -p "$training_port" root@127.0.0.1 '
     test -z "$process" || ! grep -aF "hf_fixture_training_token_456" "/proc/$process/environ"
   done
   for process in $(pgrep -f "agora_cli.py|agora_heartbeat_agent.py|agora_machine_sentinel_agent.py" || true); do
-    ! grep -aF "hf_fixture_training_token_456" "/proc/$process/environ"
-    ! grep -aF "AGORA_BOOT_LAUNCH_B64=" "/proc/$process/environ"
+    if test -r "/proc/$process/environ"; then
+      ! grep -aF "hf_fixture_training_token_456" "/proc/$process/environ"
+      ! grep -aF "AGORA_BOOT_LAUNCH_B64=" "/proc/$process/environ"
+    fi
   done
   printf "%s\n" "$third_pid" > "$root/fake-running-pid"
 '
@@ -785,12 +787,14 @@ wait_for_bootstrap "$configured"
 ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   set -Eeuo pipefail
   test "$(cat /run/agora-image-bootstrap.status)" = 0
-  test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_sentinel)" = 1
-  test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_px0)" = 1
-  jq -e '\''.status == "ready" and .assignmentGeneration == 4 and
-    .runtimeTrainingSource.status == "approved_repair"'\'' /workspace/agora-run/bootstrap-receipt.json >/dev/null
+  jq -e '\''.state == "stopped" and (.reason | contains("assignment"))'\'' \
+    /run/agora-image-bootstrap.status.json >/dev/null
+  ! tmux has-session -t agora_sentinel 2>/dev/null
+  ! tmux has-session -t agora_px0 2>/dev/null
+  ! tmux has-session -t agora_gpu 2>/dev/null
 '
 test "$(docker exec "$configured" git -C /opt/agora-source rev-parse HEAD)" = "$repaired_source_commit"
+test "$(docker exec "$configured" sha256sum /workspace/agora-run/bootstrap-receipt.json | awk '{print $1}')" = "$receipt_hash"
 docker exec "$configured" test -s /workspace/agora-run/machine-sentinel/events.jsonl
 events_prefix_size="$(wc -c < "$work/events-before-restart.jsonl" | tr -d '[:space:]')"
 docker exec "$configured" head -c "$events_prefix_size" \
