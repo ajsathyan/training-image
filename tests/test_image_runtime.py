@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib
 import importlib.util
-import hashlib
 import json
 import os
 import stat
@@ -12,7 +13,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,6 +27,9 @@ def load_module(name: str, path: Path):
 
 bootstrap = load_module(
     "agora_image_bootstrap_test", ROOT / "image-runtime" / "agora_image_bootstrap.py"
+)
+boot_start = load_module(
+    "agora_boot_start_joint_test", ROOT / "image-runtime" / "agora_boot_start.py"
 )
 image_runtime = load_module(
     "fleet_image_runtime_test",
@@ -738,8 +741,29 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
         gpu_session: bool = False,
         fail_install: bool = False,
         postcondition: object | None = None,
+        persist_input: bool = False,
+        boot_resume: bool = False,
+        commit_controller_input: object | None = None,
     ) -> int:
-        config_path, token_path, receipt_path = self._write_inputs(root, config, token)
+        receipt_path = root / "bootstrap-receipt.json"
+        staging_root = root.parent / "run"
+        if persist_input:
+            staging_root.mkdir(parents=True)
+            staged = staging_root / "agora-boot-fixture"
+            staged.mkdir()
+            config_path = staged / "machine-config.json"
+            token_path = staged / "hf-token"
+            config_path.write_text(
+                json.dumps(config, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            token_path.write_text(token, encoding="utf-8")
+            config_path.chmod(0o600)
+            token_path.chmod(0o600)
+        else:
+            config_path, token_path, receipt_path = self._write_inputs(
+                root, config, token
+            )
         manifest = json.loads(
             (ROOT / "machine-runtime" / "manifest.json").read_text(encoding="utf-8")
         )
@@ -772,6 +796,7 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
         patchers = [
             mock.patch.object(bootstrap, "RUNTIME_DIR", ROOT / "machine-runtime"),
             mock.patch.object(bootstrap, "TRAINING_SOURCE", Path("/opt/agora-source")),
+            mock.patch.object(bootstrap, "STAGING_ROOT", staging_root),
             mock.patch.object(
                 bootstrap,
                 "_capability",
@@ -797,6 +822,8 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
                     str(token_path),
                     "--receipt",
                     str(receipt_path),
+                    *(["--persist-input"] if persist_input else []),
+                    *( ["--boot-resume"] if boot_resume else []),
                 ],
             ),
         ]
@@ -808,6 +835,12 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
             patchers.append(
                 mock.patch.object(
                     bootstrap, "verify_assignment_postcondition", postcondition
+                )
+            )
+        if commit_controller_input is not None:
+            patchers.append(
+                mock.patch.object(
+                    bootstrap, "_commit_controller_input", commit_controller_input
                 )
             )
         with mock.patch.dict(
@@ -824,6 +857,149 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
             finally:
                 for patcher in reversed(entered):
                     patcher.stop()
+
+    def test_staged_boot_input_is_committed_inside_assignment_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace" / "agora-run"
+            token = "fixture-staged-token"
+            machine = production_machine(root, generation=1, operation="boot-op")
+            config = production_config(machine, token, kind="ready", expected=None)
+
+            result = self._invoke(
+                root,
+                config,
+                token,
+                renderer=lambda *_args: None,
+                gpu_session=True,
+                persist_input=True,
+            )
+
+            self.assertEqual(result, 0)
+            canonical = root / "controller-input"
+            self.assertEqual(
+                json.loads((canonical / "machine-config.json").read_text()), config
+            )
+            self.assertEqual((canonical / "hf-token").read_text().strip(), token)
+            self.assertEqual(stat.S_IMODE(canonical.stat().st_mode), 0o700)
+            self.assertEqual(
+                stat.S_IMODE((canonical / "machine-config.json").stat().st_mode),
+                0o600,
+            )
+            self.assertEqual(
+                stat.S_IMODE((canonical / "hf-token").stat().st_mode), 0o600
+            )
+            self.assertEqual(
+                json.loads((root / "assignment.json").read_text())["state"], "ready"
+            )
+            self.assertEqual(
+                json.loads((root / "training-intent.json").read_text())["desiredState"],
+                "running",
+            )
+
+    def test_exported_controller_envelope_runs_adapter_into_real_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace" / "agora-run"
+            token = "fixture-controller-to-bootstrap-token"
+            machine = production_machine(root, generation=1, operation="boot-op")
+            machine.pop("providerResourceId")
+            machine.pop("announcePort")
+            launch = image_runtime.build_machine_boot_launch(machine, token=token)
+            encoded = base64.b64encode(
+                json.dumps(launch, sort_keys=True, separators=(",", ":")).encode()
+            ).decode()
+            status = Path(directory) / "boot-status.json"
+
+            def invoke(config, observed_token, *, persist):
+                self.assertTrue(persist)
+                self.assertEqual(observed_token, token)
+                return self._invoke(
+                    root,
+                    config,
+                    observed_token,
+                    renderer=lambda *_args: None,
+                    gpu_session=True,
+                    persist_input=True,
+                )
+
+            with (
+                mock.patch.object(boot_start, "STATUS", status),
+                mock.patch.object(boot_start, "_verify_boot_capability"),
+                mock.patch.object(
+                    boot_start,
+                    "resolve_provider_metadata_with_retry",
+                    return_value=("pod-from-provider", 35777),
+                ),
+                mock.patch.object(boot_start, "_run_bootstrap", side_effect=invoke),
+            ):
+                result = boot_start.main(
+                    {
+                        "AGORA_BOOT_AUTOSTART": "1",
+                        "AGORA_BOOT_LAUNCH_B64": encoded,
+                        "AGORA_BOOT_HF_TOKEN": token,
+                        "AGORA_BOOT_METADATA_WAIT_SECONDS": "0",
+                    }
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(json.loads(status.read_text())["state"], "ready")
+            receipt = json.loads((root / "bootstrap-receipt.json").read_text())
+            self.assertEqual(receipt["providerResourceId"], "pod-from-provider")
+            self.assertEqual(receipt["training"]["status"], "started")
+
+    def test_staged_boot_persistence_oracle_fails_when_commit_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace" / "agora-run"
+            token = "fixture-staged-token"
+            machine = production_machine(root, generation=1, operation="boot-op")
+            config = production_config(machine, token, kind="ready", expected=None)
+
+            result = self._invoke(
+                root,
+                config,
+                token,
+                renderer=lambda *_args: None,
+                gpu_session=True,
+                persist_input=True,
+                commit_controller_input=lambda *_args: None,
+            )
+
+            self.assertEqual(result, 0)
+            canonical = root / "controller-input"
+            self.assertFalse((canonical / "machine-config.json").exists())
+            self.assertFalse((canonical / "hf-token").exists())
+
+    def test_boot_resume_rechecks_pause_while_holding_assignment_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace" / "agora-run"
+            token = "fixture-token"
+            machine = production_machine(root, generation=1, operation="boot-op")
+            config = production_config(machine, token, kind="ready", expected=None)
+            root.mkdir(parents=True)
+            self._seed_binding(root, machine, token, state="ready")
+            bootstrap._private_write(
+                root / "training-intent.json",
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "assignmentGeneration": 1,
+                        "operationId": "boot-op",
+                        "desiredState": "paused",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+            )
+
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "paused"):
+                self._invoke(
+                    root,
+                    config,
+                    token,
+                    renderer=lambda *_args: None,
+                    gpu_session=True,
+                    boot_resume=True,
+                )
 
     def _seed_binding(
         self,

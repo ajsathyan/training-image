@@ -13,7 +13,7 @@ build and run fresh-container tests without pushing. Merges to `main` publish
 
 - upstream image: `ghcr.io/pluralisresearch/agora-test@sha256:da54b2e3e37b90f9f62d9a04546a95e3bd4711fb4641bd61c13e3db8561a1326`
 - Agora training source: `PluralisResearch/agora-test@71a44b894100baa8f2996b97e73ae0bd67fa6b9d`
-- fleet runtime: `ajsathyan/agora-runpod@becf930c74e00b30c096fe7f009dabc694ad42b1`
+- fleet runtime: `ajsathyan/agora-runpod@f0785e92eb7143f7cc7239457b4fbc2464b2a653`
 - fleet source tree: `b8713aaa1362d7265ffc6b76c6b4751d4a261618`
 - px0: `v0.1.6`, verified by the SHA-256 in `Dockerfile`
 - in-place repair build tooling: exact wheel hashes in
@@ -61,10 +61,35 @@ SSH starts before bootstrap. Missing machine config leaves SSH ready with
 training disabled. Sentinel reporting, inspection, and px0 are optional and
 cannot block requested training. Training failures still fail the core receipt.
 
+### Explicit provider boot-autostart
+
+Normal/manual users need no controller reporting credentials. With no
+`AGORA_BOOT_AUTOSTART=1`, `/start.sh` keeps the existing behavior: it runs saved
+canonical controller input when present, otherwise leaves SSH ready and training
+off. Merely setting an HF token never opts in.
+
+The opt-in controller supplies one base64 `agora.machine-boot-launch.v1`
+envelope in `AGORA_BOOT_LAUNCH_B64` and only that machine's credential in
+`AGORA_BOOT_HF_TOKEN`. The envelope carries no provider API key and defers the
+provider resource id and public training port. RunPod must provide exact
+`RUNPOD_POD_ID` and `RUNPOD_TCP_PORT_49200`; Vast must provide numeric
+`CONTAINER_ID` (or exact `VAST_CONTAINERLABEL=C.<id>`) and
+`VAST_TCP_PORT_49200`. The adapter reopens provider-owned metadata files during
+its bounded wait. It never scans ports, uses internal 49200 as public, or infers
+SSH+1.
+
+Missing metadata records `waiting_for_network_config`; malformed or conflicting
+input records `invalid_input`. Both leave SSH/container life intact for the
+controller's SSH fallback. `/start.sh`, Vast `onstart`, repair, and reboot share
+one starter/assignment lock. A saved newer ready assignment restarts from its
+canonical 0600 input; staged, fenced, paused, corrupt, or stale launch state
+stays stopped. `training-intent.json` records running versus paused intent.
+
 Configured heartbeat uses a separately written 0600 machine-secret dotenv file;
 the image never receives the controller's master heartbeat secret. Its baked
 agent and watchdog start only with requested training, preserve local state over
-container restart, and report `started`, `staged`, or `disabled` in the receipt.
+container restart, and report `started`, `staged`, `disabled`, or nonblocking
+`unavailable` in the receipt.
 
 The exact baked training commit remains immutable build provenance. If the
 canonical outdated-client repair advances the checkout, it atomically records
@@ -110,7 +135,7 @@ Use a fleet clone containing the reviewed exact commit:
 ```bash
 python3 tools/export_fleet_runtime.py \
   --source-repo /absolute/path/to/agora-runpod \
-  --source-commit becf930c74e00b30c096fe7f009dabc694ad42b1 \
+  --source-commit f0785e92eb7143f7cc7239457b4fbc2464b2a653 \
   --output-dir machine-runtime
 python3 -m unittest tests.test_runtime_export -v
 ```

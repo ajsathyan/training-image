@@ -159,6 +159,25 @@ def _write_manifest(path: Path, value: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def private_atomic_write(path: Path, data: bytes, *, mode: int = 0o600) -> None:
+    """Write one private durable file with the assignment lock already held."""
+
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.next")
+    with temporary.open("wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.chmod(mode)
+    temporary.replace(path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 @dataclass
 class AssignmentTransition:
     root: Path

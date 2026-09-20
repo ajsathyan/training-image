@@ -15,6 +15,13 @@ from typing import Any
 CAPABILITY_SCHEMA = "agora.machine-image-capability.v1"
 CONFIG_SCHEMA = "agora.machine-image-config.v1"
 RECEIPT_SCHEMA = "agora.machine-image-bootstrap-receipt.v1"
+BOOT_LAUNCH_SCHEMA = "agora.machine-boot-launch.v1"
+BOOT_AUTOSTART_ENV = "AGORA_BOOT_AUTOSTART"
+BOOT_LAUNCH_ENV = "AGORA_BOOT_LAUNCH_B64"
+BOOT_TOKEN_ENV = "AGORA_BOOT_HF_TOKEN"
+BOOT_RESERVED_ENV = frozenset(
+    {BOOT_AUTOSTART_ENV, BOOT_LAUNCH_ENV, BOOT_TOKEN_ENV}
+)
 CAPABILITY_PATH = "/opt/agora-image-runtime/capability.json"
 BOOTSTRAP_PATH = "/opt/agora-image-runtime/agora_image_bootstrap.py"
 PYTHON_PATH = "/opt/agora-venv/bin/python"
@@ -23,6 +30,200 @@ DEFAULT_REMOTE_ROOT = "/workspace/agora-run"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ASSIGNMENT_STATES = {"fenced", "staged", "ready"}
 _ASSIGNMENT_TRANSITIONS = {"stage", "ready", "rollback_prior"}
+
+
+def build_machine_boot_launch(
+    machine: Mapping[str, Any],
+    *,
+    token: str,
+    error: type[Exception] = ValueError,
+) -> dict[str, Any]:
+    """Build one provider-deferred, machine-scoped boot launch envelope.
+
+    Provider resource identity and the public mapping for 49200 are deliberately
+    absent. The image resolves both from provider-owned metadata before it can
+    call the canonical v1 bootstrap.
+    """
+
+    if not token or any(character in token for character in "\r\n\x00"):
+        raise error("boot launch requires one machine-scoped HF token")
+    capability = declared_image_capability(machine, error=error)
+    if capability is None:
+        raise error("boot launch requires a declared image capability")
+    provider = _text(machine, "provider", error=error).lower()
+    if provider not in {"runpod", "vast"}:
+        raise error("boot launch provider must be runpod or vast")
+    node_type = str(
+        machine.get("agoraJoinRole") or machine.get("provisioningRole") or "tail"
+    ).strip().lower()
+    if node_type not in {"head", "body", "tail"}:
+        raise error("boot launch requires a canonical node role")
+    operation_id = _text(machine, "assignmentOperationId", error=error)
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    config: dict[str, Any] = {
+        "schemaVersion": CONFIG_SCHEMA,
+        "machineId": _text(machine, "id", "machineId", error=error),
+        "provider": provider,
+        "accountScope": _text(
+            machine, "accountScope", "providerAccount", error=error
+        ).lower(),
+        "tokenLabel": _text(machine, "tokenLabel", error=error),
+        "tokenInstance": _positive_int(machine, "tokenInstance", error=error),
+        "assignmentGeneration": _positive_int(
+            machine, "assignmentGeneration", error=error
+        ),
+        "assignmentOperationId": operation_id,
+        "runId": _text(machine, "runId", error=error),
+        "trainingSessionId": str(
+            machine.get("trainingSessionId") or operation_id
+        ).strip(),
+        "gpuModel": _text(machine, "gpuModel", error=error),
+        "nodeType": node_type,
+        "provisioningOrigin": str(
+            machine.get("provisioningOrigin") or "provider_boot"
+        ).strip(),
+        "hostPort": 49200,
+        "remoteRoot": _remote_root(machine, error=error),
+        "startTraining": True,
+        "px0Enabled": bool(machine.get("px0Enabled", True)),
+        "tokenSha256": digest,
+        "assignmentTransition": {
+            "kind": "ready",
+            "allowAbsent": True,
+            "expectedManifest": None,
+        },
+        "imageCapability": capability,
+        "sentinel": {"mode": "local", "url": "", "timeoutSeconds": 10.0},
+        "heartbeat": {"mode": "disabled", "url": ""},
+    }
+    for name in (
+        "fleetId",
+        "authorityEpoch",
+        "launchId",
+        "reservationId",
+        "slotId",
+        "slotGeneration",
+        "machineGenerationId",
+    ):
+        if machine.get(name) is not None:
+            config[name] = machine[name]
+    return {
+        "schemaVersion": BOOT_LAUNCH_SCHEMA,
+        "tokenSha256": digest,
+        "config": config,
+    }
+
+
+def encode_machine_boot_launch(
+    launch: Mapping[str, Any], *, error: type[Exception] = ValueError
+) -> str:
+    if launch.get("schemaVersion") != BOOT_LAUNCH_SCHEMA:
+        raise error("boot launch has unsupported schemaVersion")
+    try:
+        payload = json.dumps(
+            dict(launch), sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise error("boot launch is not canonical JSON") from exc
+    return base64.b64encode(payload).decode("ascii")
+
+
+def merge_runpod_boot_launch(
+    payload: Mapping[str, Any],
+    *,
+    launch: Mapping[str, Any],
+    token: str,
+    starter_path: str = "/start.sh",
+    starter_log: str = "/var/log/agora-image-start.log",
+    error: type[Exception] = ValueError,
+) -> dict[str, Any]:
+    """Merge opt-in boot inputs while preserving the user's argv and env."""
+
+    result = dict(payload)
+    env = dict(result.get("env") or {})
+    collisions = BOOT_RESERVED_ENV.intersection(str(key) for key in env)
+    if collisions:
+        raise error(
+            "RunPod launch environment overrides reserved boot keys: "
+            + ", ".join(sorted(collisions))
+        )
+    env.update(
+        {
+            BOOT_AUTOSTART_ENV: "1",
+            BOOT_LAUNCH_ENV: encode_machine_boot_launch(launch, error=error),
+            BOOT_TOKEN_ENV: token,
+        }
+    )
+    original = list(result.get("dockerStartCmd") or [])
+    if original:
+        result["dockerStartCmd"] = [
+            "/bin/bash",
+            "-lc",
+            f"nohup {shlex.quote(starter_path)} >{shlex.quote(starter_log)} 2>&1 & exec \"$@\"",
+            "agora-user-command",
+            *original,
+        ]
+    result["env"] = env
+    return result
+
+
+def merge_vast_boot_launch(
+    payload: Mapping[str, Any],
+    *,
+    launch: Mapping[str, Any],
+    token: str,
+    starter_path: str = "/start.sh",
+    starter_log: str = "/var/log/agora-image-start.log",
+    error: type[Exception] = ValueError,
+) -> dict[str, Any]:
+    """Merge Vast docker flags and append the shared starter to ssh_direct."""
+
+    result = dict(payload)
+    env = dict(result.get("env") or {})
+    reserved_flags = {f"-e {name}" for name in BOOT_RESERVED_ENV}
+    collisions = reserved_flags.intersection(str(key) for key in env)
+    if collisions:
+        raise error(
+            "Vast launch environment overrides reserved boot keys: "
+            + ", ".join(sorted(collisions))
+        )
+    env.update(
+        {
+            f"-e {BOOT_AUTOSTART_ENV}": "1",
+            f"-e {BOOT_LAUNCH_ENV}": encode_machine_boot_launch(
+                launch, error=error
+            ),
+            f"-e {BOOT_TOKEN_ENV}": token,
+        }
+    )
+    onstart = str(result.get("onstart") or "").rstrip()
+    result["onstart"] = (
+        onstart
+        + ("; " if onstart else "")
+        + f"nohup {shlex.quote(starter_path)} >{shlex.quote(starter_log)} 2>&1 &"
+    )
+    result["env"] = env
+    return result
+
+
+def boot_launch_summary(launch: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the persistable secret-free binding for a launch envelope."""
+
+    config = launch.get("config")
+    if not isinstance(config, Mapping):
+        return {"schemaVersion": launch.get("schemaVersion"), "valid": False}
+    return {
+        "schemaVersion": launch.get("schemaVersion"),
+        "valid": True,
+        "machineId": config.get("machineId"),
+        "provider": config.get("provider"),
+        "accountScope": config.get("accountScope"),
+        "assignmentOperationId": config.get("assignmentOperationId"),
+        "assignmentGeneration": config.get("assignmentGeneration"),
+        "tokenLabel": config.get("tokenLabel"),
+        "tokenInstance": config.get("tokenInstance"),
+        "tokenSha256": launch.get("tokenSha256"),
+    }
 
 
 def configured_image_capability(
@@ -621,8 +822,8 @@ if (
 heartbeat = receipt.get("heartbeat")
 heartbeat_configured = expected["heartbeatConfigured"]
 expected_heartbeat_status = (
-    "started" if heartbeat_configured and expected_requested
-    else ("started", "staged") if heartbeat_configured and transition.get("state") == "ready"
+    ("started", "unavailable") if heartbeat_configured and expected_requested
+    else ("started", "staged", "unavailable") if heartbeat_configured and transition.get("state") == "ready"
     else "staged" if heartbeat_configured
     else "disabled"
 )
@@ -724,7 +925,10 @@ jq -e --argjson expected "$EXPECTED_IMAGE_RECEIPT" --arg capabilitySha "$CAPABIL
   .assignmentTransition.state == "ready" and
   .training.requested == true and .training.status == "started" and
   (.heartbeat.requested == $expected.heartbeatConfigured) and
-  (.heartbeat.status == (if $expected.heartbeatConfigured then "started" else "disabled" end))
+  (.heartbeat.status as $heartbeatStatus |
+    if $expected.heartbeatConfigured then
+      ($heartbeatStatus == "started" or $heartbeatStatus == "unavailable")
+    else $heartbeatStatus == "disabled" end)
 ' "$RECEIPT" >/dev/null 2>&1 || {{ echo 'image bootstrap receipt no longer proves this assignment' >&2; exit 79; }}
 """
 

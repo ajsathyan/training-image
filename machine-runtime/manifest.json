@@ -1,5 +1,5 @@
 {
-  "artifactFingerprint": "5d616e237d572bb7547ef72e41adc15ab813d31937b15c8796433d5f53daf0ee",
+  "artifactFingerprint": "9f9be655a0c0168c833b68db999b19a09d6c004f5e72eeea7884a01993325e43",
   "files": [
     {
       "kind": "generated_package_marker",
@@ -26,9 +26,9 @@
     {
       "kind": "source",
       "path": "scripts/agora_control/execution/image_runtime.py",
-      "sha256": "c7b6751f68b59b0e686fde99a3084d265a51b9339478b4653f870716f38f5616",
+      "sha256": "9d05ca2bec02a15a52ce6fbcdbf19666aa938f2031571d5ad03d55b6c1e9d21f",
       "sourcePath": "scripts/agora_control/execution/image_runtime.py",
-      "sourceSha256": "c7b6751f68b59b0e686fde99a3084d265a51b9339478b4653f870716f38f5616"
+      "sourceSha256": "9d05ca2bec02a15a52ce6fbcdbf19666aa938f2031571d5ad03d55b6c1e9d21f"
     },
     {
       "kind": "renderer_dependency",
@@ -136,10 +136,10 @@
   ],
   "schemaVersion": "agora.machine-runtime-export.v1",
   "source": {
-    "artifactFingerprint": "0d9a9d9aa4e56ee67e3e12e10ced3e850736d227aabed98dc28416bd547b5f1e",
-    "commit": "becf930c74e00b30c096fe7f009dabc694ad42b1",
+    "artifactFingerprint": "a46a8aa447201103b0bea93e8ebd274208f415f9608fb4bfc92c0c1be50dfc04",
+    "commit": "f0785e92eb7143f7cc7239457b4fbc2464b2a653",
     "manifestPath": "runtime/machine-runtime-source.v1.json",
-    "manifestSha256": "cfd864560656ad137cd7b678df80fef299b9cd1e525f2f7de96c27f0c627b23c",
-    "tree": "b8713aaa1362d7265ffc6b76c6b4751d4a261618"
+    "manifestSha256": "c60057e8ee060d587338915b22043708adc82898470fe1d1ccb35472777ff6ea",
+    "tree": "d4136a6913ab94764ef0742fff9b1ddba04564ab"
   }
 }

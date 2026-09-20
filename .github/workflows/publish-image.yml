@@ -264,11 +264,13 @@ jobs:
           exit 1
 
       - name: Upload build and container evidence
-        if: always() && steps.record_evidence.outcome == 'success'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: training-image-evidence-${{ github.sha }}
           path: |
             image-build-evidence.json
             image-smoke-evidence.json
-          if-no-files-found: error
+            .smoke-failures/
+          include-hidden-files: true
+          if-no-files-found: warn
