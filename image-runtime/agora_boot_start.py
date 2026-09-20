@@ -251,18 +251,22 @@ def _run_bootstrap(config: dict[str, Any], token: str, *, persist: bool) -> int:
         ]
         if persist:
             command.append("--persist-input")
-        child_environment = dict(os.environ)
-        for name in (
-            "HF_TOKEN",
-            "AGORA_BOOT_HF_TOKEN",
-            "AGORA_BOOT_LAUNCH_B64",
-            "AGORA_SENTINEL_BOOTSTRAP_TOKEN",
-            "AGORA_SENTINEL_MACHINE_TOKEN",
-        ):
-            child_environment.pop(name, None)
         return subprocess.run(
-            command, check=False, env=child_environment
+            command, check=False, env=_child_environment()
         ).returncode
+
+
+def _child_environment() -> dict[str, str]:
+    child_environment = dict(os.environ)
+    for name in (
+        "HF_TOKEN",
+        "AGORA_BOOT_HF_TOKEN",
+        "AGORA_BOOT_LAUNCH_B64",
+        "AGORA_SENTINEL_BOOTSTRAP_TOKEN",
+        "AGORA_SENTINEL_MACHINE_TOKEN",
+    ):
+        child_environment.pop(name, None)
+    return child_environment
 
 
 def _apply_provider_metadata(
@@ -302,6 +306,25 @@ def _saved_boot(root: Path, environment: Mapping[str, str]) -> int:
     return _run_bootstrap(config, token, persist=True)
 
 
+def _restore_saved_observation(root: Path) -> int:
+    canonical = root / "controller-input"
+    return subprocess.run(
+        [
+            str(PYTHON),
+            str(BOOTSTRAP),
+            "--config",
+            str(canonical / "machine-config.json"),
+            "--token-file",
+            str(canonical / "hf-token"),
+            "--receipt",
+            str(root / "bootstrap-receipt.json"),
+            "--observation-resume",
+        ],
+        check=False,
+        env=_child_environment(),
+    ).returncode
+
+
 def _metadata_wait_seconds(environment: Mapping[str, str]) -> float:
     try:
         wait_seconds = float(environment.get("AGORA_BOOT_METADATA_WAIT_SECONDS") or "30")
@@ -331,9 +354,15 @@ def main(environment: Mapping[str, str] | None = None) -> int:
                     )
                     == "stopped"
                 ):
+                    rc = _restore_saved_observation(DEFAULT_ROOT)
                     _status(
-                        "stopped",
-                        "saved assignment or pause state prevents boot resume",
+                        "stopped" if rc == 0 else "observation_failed",
+                        (
+                            "saved assignment or pause state prevents training resume; "
+                            "optional observation restored"
+                            if rc == 0
+                            else f"saved training remains stopped; observation restore exited with status {rc}"
+                        ),
                         selection="saved",
                     )
                     return 0
@@ -380,7 +409,15 @@ def main(environment: Mapping[str, str] | None = None) -> int:
         root = Path(str(config.get("remoteRoot") or DEFAULT_ROOT))
         selection = _saved_selection(root, launch)
         if selection == "stopped":
-            _status("stopped", "saved assignment or pause state outranks launch input")
+            rc = _restore_saved_observation(root)
+            _status(
+                "stopped" if rc == 0 else "observation_failed",
+                (
+                    "saved assignment or pause state outranks launch input; optional observation restored"
+                    if rc == 0
+                    else f"saved training remains stopped; observation restore exited with status {rc}"
+                ),
+            )
             return 0
         if selection == "saved":
             rc = _saved_boot(root, environment)

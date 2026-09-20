@@ -178,6 +178,27 @@ def private_atomic_write(path: Path, data: bytes, *, mode: int = 0o600) -> None:
         os.close(directory_fd)
 
 
+@contextlib.contextmanager
+def saved_assignment_observation(
+    root: Path, config: dict[str, Any]
+) -> Iterator[dict[str, Any]]:
+    """Hold the assignment lock and prove config names the exact saved binding.
+
+    Observation services may be restored while training is intentionally stopped,
+    but only for the current durable assignment.  This deliberately performs no
+    assignment transition and writes no assignment or training state.
+    """
+
+    expected = assignment_binding(config)
+    with _assignment_lock(root):
+        current = _read_manifest(root / "assignment.json")
+        if current is None or not _same_binding(current, expected):
+            raise AssignmentTransitionError(
+                "saved observation configuration does not match the current assignment"
+            )
+        yield dict(current)
+
+
 @dataclass
 class AssignmentTransition:
     root: Path

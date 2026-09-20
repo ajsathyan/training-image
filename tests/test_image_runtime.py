@@ -743,6 +743,7 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
         postcondition: object | None = None,
         persist_input: bool = False,
         boot_resume: bool = False,
+        observation_resume: bool = False,
         commit_controller_input: object | None = None,
     ) -> int:
         receipt_path = root / "bootstrap-receipt.json"
@@ -824,6 +825,7 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
                     str(receipt_path),
                     *(["--persist-input"] if persist_input else []),
                     *( ["--boot-resume"] if boot_resume else []),
+                    *( ["--observation-resume"] if observation_resume else []),
                 ],
             ),
         ]
@@ -1000,6 +1002,61 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
                     gpu_session=True,
                     boot_resume=True,
                 )
+
+    def test_observation_resume_preserves_staged_assignment_and_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace" / "agora-run"
+            token = "fixture-token"
+            machine = production_machine(root, generation=1, operation="boot-op")
+            config = production_config(machine, token, kind="stage", expected=None)
+            root.mkdir(parents=True)
+            manifest = self._seed_binding(root, machine, token, state="staged")
+            receipt = root / "bootstrap-receipt.json"
+            receipt.write_text('{"existing":true}\n', encoding="utf-8")
+            receipt.chmod(0o600)
+
+            result = self._invoke(
+                root,
+                config,
+                token,
+                renderer=lambda *_args: self.fail("training assets rendered"),
+                gpu_session=False,
+                observation_resume=True,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(json.loads((root / "assignment.json").read_text()), manifest)
+            self.assertEqual(receipt.read_text(encoding="utf-8"), '{"existing":true}\n')
+
+    def test_observation_resume_binding_mismatch_preserves_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace" / "agora-run"
+            token = "fixture-token"
+            stale = production_machine(root, generation=1, operation="stale-op")
+            current = production_machine(root, generation=2, operation="current-op")
+            config = production_config(stale, token, kind="stage", expected=None)
+            root.mkdir(parents=True)
+            self._seed_binding(root, current, token, state="staged")
+            receipt = root / "bootstrap-receipt.json"
+            receipt.write_text('{"existing":true}\n', encoding="utf-8")
+            receipt.chmod(0o600)
+
+            with self.assertRaisesRegex(
+                bootstrap.AssignmentTransitionError, "does not match"
+            ):
+                self._invoke(
+                    root,
+                    config,
+                    token,
+                    gpu_session=False,
+                    observation_resume=True,
+                )
+
+            self.assertEqual(receipt.read_text(encoding="utf-8"), '{"existing":true}\n')
+            self.assertEqual(
+                json.loads((root / "assignment.json").read_text())["operationId"],
+                "current-op",
+            )
 
     def _seed_binding(
         self,

@@ -702,9 +702,10 @@ done
 test "$heartbeat_seq_after" -gt "$heartbeat_seq_before"
 
 # A durable pause marker must outrank the saved ready config on reboot. SSH
-# remains available and no owned trainer or heartbeat is restarted.
+# remains available, no owned trainer restarts, and configured observation does.
 docker exec "$training" sh -c \
   'jq '\'' .desiredState = "paused" '\'' /workspace/agora-run/training-intent.json > /workspace/agora-run/.training-intent.paused && chmod 600 /workspace/agora-run/.training-intent.paused && mv /workspace/agora-run/.training-intent.paused /workspace/agora-run/training-intent.json'
+heartbeat_seq_pause_before="$(docker exec "$training" jq -r .nextSeq /workspace/agora-run/heartbeat-agent/state.json)"
 docker exec "$training" rm -f /run/agora-image-bootstrap.status
 docker restart "$training" >/dev/null
 training_port="$(host_port "$training")"
@@ -713,7 +714,13 @@ wait_for_bootstrap "$training"
 docker exec "$training" jq -e '.state == "stopped" and (.reason | contains("pause"))' \
   /run/agora-image-bootstrap.status.json >/dev/null
 ! docker exec "$training" tmux has-session -t agora_gpu 2>/dev/null
-! docker exec "$training" tmux has-session -t agora_heartbeat 2>/dev/null
+docker exec "$training" tmux has-session -t agora_heartbeat 2>/dev/null
+for _ in $(seq 1 20); do
+  heartbeat_seq_paused="$(docker exec "$training" jq -r .nextSeq /workspace/agora-run/heartbeat-agent/state.json)"
+  if [ "$heartbeat_seq_paused" -gt "$heartbeat_seq_pause_before" ]; then break; fi
+  sleep 1
+done
+test "$heartbeat_seq_paused" -gt "$heartbeat_seq_pause_before"
 
 docker image inspect "$IMAGE" --format '{{json .Config.ExposedPorts}}' \
   | jq -e 'keys == ["22/tcp", "49200/tcp"]' >/dev/null
@@ -775,6 +782,7 @@ for _ in $(seq 1 20); do
 done
 docker exec "$configured" test -s /workspace/agora-run/machine-sentinel/events.jsonl
 events_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/machine-sentinel/events.jsonl | awk '{print $1}')"
+events_size="$(docker exec "$configured" stat -c %s /workspace/agora-run/machine-sentinel/events.jsonl)"
 docker exec "$configured" cat /workspace/agora-run/machine-sentinel/events.jsonl \
   > "$work/events-before-restart.jsonl"
 receipt_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/bootstrap-receipt.json | awk '{print $1}')"
@@ -789,13 +797,20 @@ ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   test "$(cat /run/agora-image-bootstrap.status)" = 0
   jq -e '\''.state == "stopped" and (.reason | contains("assignment"))'\'' \
     /run/agora-image-bootstrap.status.json >/dev/null
-  ! tmux has-session -t agora_sentinel 2>/dev/null
-  ! tmux has-session -t agora_px0 2>/dev/null
+  tmux has-session -t agora_sentinel 2>/dev/null
+  tmux has-session -t agora_inspection 2>/dev/null
+  tmux has-session -t agora_px0 2>/dev/null
   ! tmux has-session -t agora_gpu 2>/dev/null
 '
 test "$(docker exec "$configured" git -C /opt/agora-source rev-parse HEAD)" = "$repaired_source_commit"
 test "$(docker exec "$configured" sha256sum /workspace/agora-run/bootstrap-receipt.json | awk '{print $1}')" = "$receipt_hash"
 docker exec "$configured" test -s /workspace/agora-run/machine-sentinel/events.jsonl
+for _ in $(seq 1 20); do
+  current_events_size="$(docker exec "$configured" stat -c %s /workspace/agora-run/machine-sentinel/events.jsonl)"
+  if [ "$current_events_size" -gt "$events_size" ]; then break; fi
+  sleep 1
+done
+test "$current_events_size" -gt "$events_size"
 events_prefix_size="$(wc -c < "$work/events-before-restart.jsonl" | tr -d '[:space:]')"
 docker exec "$configured" head -c "$events_prefix_size" \
   /workspace/agora-run/machine-sentinel/events.jsonl \

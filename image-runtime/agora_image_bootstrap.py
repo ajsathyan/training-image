@@ -24,6 +24,7 @@ from assignment_transition import (  # noqa: E402
     AssignmentTransitionError,
     assignment_transition,
     private_atomic_write,
+    saved_assignment_observation,
     verify_assignment_postcondition,
 )
 
@@ -1166,6 +1167,11 @@ def _arguments() -> argparse.Namespace:
         action="store_true",
         help="Require a ready, unpaused saved assignment while holding its lock.",
     )
+    parser.add_argument(
+        "--observation-resume",
+        action="store_true",
+        help="Restore optional observation for the exact saved assignment without training.",
+    )
     return parser.parse_args()
 
 
@@ -1208,6 +1214,31 @@ def main() -> int:
         assets, remote_assets = _load_runtime_modules()
         root.mkdir(parents=True, exist_ok=True)
         _source, commit = _verify_baked_training_source()
+        if args.observation_resume:
+            if args.persist_input or args.boot_resume:
+                raise BootstrapError("observation resume cannot change assignment state")
+            with saved_assignment_observation(root, normalized):
+                if normalized["heartbeat"]["mode"] == "configured":
+                    _record_optional(
+                        root, "heartbeat", lambda: _heartbeat(root, normalized, assets)
+                    )
+                _record_optional(
+                    root,
+                    "sentinel",
+                    lambda: _sentinel(root, normalized, remote_assets),
+                )
+                inspection = _record_optional(
+                    root, "inspection", lambda: _refresh_inspection(root, capability)
+                )
+                if normalized["px0Enabled"] and inspection["status"] == "ready":
+                    _record_optional(
+                        root, "px0", lambda: _px0(root, True, capability)
+                    )
+            print(
+                "agora image runtime: observation restored "
+                f"machine={normalized['machineId']} root={root} commit={commit}"
+            )
+            return 0
         with assignment_transition(
             root,
             normalized,
@@ -1403,6 +1434,10 @@ def main() -> int:
         OSError,
         ValueError,
     ) as exc:
+        if args.observation_resume:
+            # Observation restoration is not assignment/training setup and
+            # never owns the canonical bootstrap receipt, including failures.
+            raise
         _write_receipt(
             receipt_path,
             {

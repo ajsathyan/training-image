@@ -13,8 +13,9 @@ build and run fresh-container tests without pushing. Merges to `main` publish
 
 - upstream image: `ghcr.io/pluralisresearch/agora-test@sha256:da54b2e3e37b90f9f62d9a04546a95e3bd4711fb4641bd61c13e3db8561a1326`
 - Agora training source: `PluralisResearch/agora-test@71a44b894100baa8f2996b97e73ae0bd67fa6b9d`
-- fleet runtime: `ajsathyan/agora-runpod@f0785e92eb7143f7cc7239457b4fbc2464b2a653`
-- fleet source tree: `b8713aaa1362d7265ffc6b76c6b4751d4a261618`
+- fleet runtime: `ajsathyan/agora-runpod@7c6184b8e5a1bbfb30ce844b023732fe6b851a82`
+- fleet source tree: `c339bb3e3ac2290ed283bbafb386413c2f32975e`
+- runtime export: `0426924f184bae4124140730c26b2621dcd9f90180bc7a08f1f8967bfc9ae8a1`
 - px0: `v0.1.6`, verified by the SHA-256 in `Dockerfile`
 - in-place repair build tooling: exact wheel hashes in
   `image-repair-build-requirements.txt`

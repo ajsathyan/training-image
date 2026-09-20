@@ -526,15 +526,21 @@ def _assignment_fence_precondition(
     mode = str(eligibility.get("mode") or "").strip().lower()
     requires_approval = eligibility.get("requiresApproval")
     expected_mode = "default" if classification == "never_started" else "approved_sync"
+    apply_authorized = (
+        classification == "training_progress"
+        and eligibility.get("authorizationKind") == "assignment_apply"
+    )
     if (
         eligibility.get("eligible") is not True
         or eligibility.get("machineId") != context["machineId"]
         or eligibility.get("expectedAssignmentGeneration")
         != expected_assignment_generation
         or eligibility.get("operationId") != context["operationId"]
-        or classification not in {"never_started", "auth_queue", "state_download"}
+        or classification
+        not in {"never_started", "auth_queue", "state_download", "training_progress"}
         or mode != expected_mode
         or requires_approval is not (classification != "never_started")
+        or (classification == "training_progress" and not apply_authorized)
     ):
         raise ValueError("assignment fence eligibility binding is invalid")
 
@@ -550,6 +556,7 @@ def _assignment_fence_precondition(
         "classification": classification,
         "mode": mode,
         "requiresApproval": requires_approval,
+        "authorizationKind": "assignment_apply" if apply_authorized else None,
     }
 
 
@@ -652,7 +659,10 @@ fence_fresh_eligibility_matches() {{
   current_classification="$(assignment_current_classification)"
   [ "$current_classification" = "$expected_classification" ] || return 1
   case "$current_classification" in
-    training_progress|joined|unknown) return 1 ;;
+    training_progress)
+      [ "$(printf '%s' "$FENCE_PRECONDITION_JSON" | jq -r '.authorizationKind // empty')" = assignment_apply ] || return 1
+      ;;
+    joined|unknown) return 1 ;;
   esac
   if [ "$expected_classification" = never_started ]; then
     agora_pattern="$ROOT/(supervise|launch)-agora-gpu0[.]sh"
