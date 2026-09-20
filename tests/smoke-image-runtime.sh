@@ -543,7 +543,7 @@ docker exec "$training" jq -e '.status == "ready" and
   .assignmentTransition.idempotent == true and
   .training.status == "already_started"' \
   /workspace/agora-run/bootstrap-receipt.json >/dev/null
-test "$(docker exec "$training" sh -c 'ps -eo pid=,args= | awk '\''$2 == "/opt/agora-venv/bin/python" && $3 == "agora_cli.py" {print $1; exit}'\'')')" \
+test "$(docker exec "$training" sh -c 'ps -eo pid=,args= | awk '\''$2 == "/opt/agora-venv/bin/python" && $3 == "agora_cli.py" {print $1; exit}'\''')" \
   = "$(docker exec "$training" cat /workspace/agora-run/fake-running-pid)"
 mv "$work/training-ready-config.json" "$training_state/controller-input/machine-config.json"
 training_identity_hash="$(docker exec "$training" sha256sum /workspace/agora-run/private_gpu0.key | awk '{print $1}')"
