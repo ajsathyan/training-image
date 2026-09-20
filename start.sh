@@ -24,14 +24,14 @@ if ! grep -qF 'source /etc/rp_environment' /root/.bashrc; then
     printf '%s\n' 'source /etc/rp_environment' >> /root/.bashrc
 fi
 
-if [[ -n "${AGORA_SENTINEL_BOOTSTRAP_TOKEN:-}" ]]; then
-    umask 077
-    sentinel_state_dir=/workspace/.agora/machine-sentinel
-    mkdir -p "$sentinel_state_dir"
-    chmod 700 /workspace/.agora "$sentinel_state_dir"
-    /opt/agora-machine-sentinel/start-machine-sentinel.sh \
-        >> "$sentinel_state_dir/launcher.log" 2>&1 &
-    unset AGORA_SENTINEL_BOOTSTRAP_TOKEN
-fi
+rm -f /run/agora-image-bootstrap.status
+set +e
+/opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
+    >/var/log/agora-image-bootstrap.log 2>&1
+bootstrap_rc=$?
+set -e
+printf '%s\n' "$bootstrap_rc" > /run/agora-image-bootstrap.status
+
+unset HF_TOKEN AGORA_SENTINEL_BOOTSTRAP_TOKEN AGORA_SENTINEL_MACHINE_TOKEN
 
 exec sleep infinity

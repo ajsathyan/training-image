@@ -5,8 +5,13 @@ on:
   pull_request:
     paths:
       - Dockerfile
+      - .dockerignore
+      - image-repair-build-requirements.txt
       - start.sh
       - machine-sentinel/**
+      - image-runtime/**
+      - machine-runtime/**
+      - tools/**
       - tests/**
       - .github/workflows/publish-image.yml
   push:
@@ -14,8 +19,13 @@ on:
       - main
     paths:
       - Dockerfile
+      - .dockerignore
+      - image-repair-build-requirements.txt
       - start.sh
       - machine-sentinel/**
+      - image-runtime/**
+      - machine-runtime/**
+      - tools/**
       - tests/**
       - .github/workflows/publish-image.yml
 
@@ -27,6 +37,7 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/training-image
   DOCKER_BUILD_RECORD_UPLOAD: false
   DOCKER_BUILD_SUMMARY: false
+  PYTHONDONTWRITEBYTECODE: "1"
 
 jobs:
   build:
@@ -70,8 +81,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Verify source artifacts
+        run: |
+          python3 -m py_compile image-runtime/*.py tools/*.py
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          bash -n start.sh tests/*.sh
+
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -84,65 +101,174 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-
+            type=raw,value=candidate-${{ github.sha }}
 
-      - name: Build and push
+      - name: Start build timer
+        run: echo "BUILD_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Build local nonpublishing candidate
+        if: github.event_name != 'push'
+        id: build_local
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          load: ${{ github.event_name == 'pull_request' }}
+          push: false
+          load: true
           platforms: linux/amd64
           pull: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      - name: Smoke published image
+      - name: Upload untagged release candidate by digest
+        if: github.event_name == 'push'
+        id: build_release
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          pull: true
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push=true,push-by-digest=true,name-canonical=true
+
+      - name: Select exact smoke image
         env:
-          IMAGE: ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          TAGGED_IMAGE: ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          LOCAL_DIGEST: ${{ steps.build_local.outputs.digest }}
+          RELEASE_DIGEST: ${{ steps.build_release.outputs.digest }}
         run: |
-          set -Eeuo pipefail
-          key_dir="$(mktemp -d)"
-          container_name="agora-training-image-smoke"
-          cleanup() {
-            status=$?
-            if [ "$status" -ne 0 ]; then
-              docker logs "$container_name" || true
-            fi
-            docker rm -f "$container_name" >/dev/null 2>&1 || true
-            rm -rf "$key_dir"
-            exit "$status"
-          }
-          trap cleanup EXIT
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            test -n "$RELEASE_DIGEST"
+            echo "SMOKE_IMAGE=${IMAGE_NAME}@${RELEASE_DIGEST}" >> "$GITHUB_ENV"
+            echo "BUILD_DIGEST=${RELEASE_DIGEST}" >> "$GITHUB_ENV"
+          else
+            test -n "$LOCAL_DIGEST"
+            echo "SMOKE_IMAGE=$TAGGED_IMAGE" >> "$GITHUB_ENV"
+            echo "BUILD_DIGEST=${LOCAL_DIGEST}" >> "$GITHUB_ENV"
+          fi
 
-          ssh-keygen -q -t ed25519 -N '' -f "$key_dir/id_ed25519"
-          docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
-          docker run -d \
-            --name "$container_name" \
-            -e PUBLIC_KEY="$(cat "$key_dir/id_ed25519.pub")" \
-            -p 127.0.0.1:2222:22 \
-            "$IMAGE"
-
-          for _ in $(seq 1 30); do
-            if ssh -i "$key_dir/id_ed25519" -p 2222 \
-              -o BatchMode=yes \
-              -o ConnectTimeout=2 \
-              -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              root@127.0.0.1 true 2>/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-
-          ssh -i "$key_dir/id_ed25519" -p 2222 \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            root@127.0.0.1 \
-            'set -eu; /opt/agora-venv/bin/python -c '\''import sys, torch, pithos, agora_server, agora; assert sys.version_info[:2] == (3, 13); assert torch.__version__.startswith("2.11.")'\''; command -v git curl jq tmux ss crontab; test -x /opt/agora-machine-sentinel/start-machine-sentinel.sh; test ! -e /workspace/.agora/machine-sentinel/state.json; pgrep -x sshd; pgrep -x cron'
+      - name: Smoke exact built image
+        id: smoke_image
+        env:
+          IMAGE: ${{ env.SMOKE_IMAGE }}
+          BUILD_DIGEST: ${{ env.BUILD_DIGEST }}
+          SMOKE_EVIDENCE: image-smoke-evidence.json
+        run: bash tests/smoke-image-runtime.sh
 
       - name: Smoke Machine Sentinel protocol
+        id: smoke_sentinel
         run: bash tests/smoke-machine-sentinel.sh
+
+      - name: Promote tested digest to full commit tag
+        if: github.event_name == 'push'
+        id: promote_commit
+        continue-on-error: true
+        env:
+          CANDIDATE_DIGEST: ${{ env.BUILD_DIGEST }}
+          COMMIT_TAG: sha-${{ github.sha }}
+        run: |
+          set +e
+          create_rc=0
+          docker buildx imagetools create \
+            --tag "${IMAGE_NAME}:${COMMIT_TAG}" \
+            "${IMAGE_NAME}@${CANDIDATE_DIGEST}" || create_rc=$?
+          promoted_digest="$(docker buildx imagetools inspect \
+            "${IMAGE_NAME}:${COMMIT_TAG}" --format '{{.Manifest.Digest}}' \
+            2>/dev/null)"
+          inspect_rc=$?
+          set -e
+          echo "digest=$promoted_digest" >> "$GITHUB_OUTPUT"
+          test "$create_rc" = 0
+          test "$inspect_rc" = 0
+          test "$promoted_digest" = "$CANDIDATE_DIGEST"
+
+      - name: Promote tested digest to latest
+        if: github.event_name == 'push' && steps.promote_commit.outcome == 'success'
+        id: promote_latest
+        continue-on-error: true
+        env:
+          CANDIDATE_DIGEST: ${{ env.BUILD_DIGEST }}
+        run: |
+          set +e
+          create_rc=0
+          docker buildx imagetools create \
+            --tag "${IMAGE_NAME}:latest" \
+            "${IMAGE_NAME}@${CANDIDATE_DIGEST}" || create_rc=$?
+          promoted_digest="$(docker buildx imagetools inspect \
+            "${IMAGE_NAME}:latest" --format '{{.Manifest.Digest}}' \
+            2>/dev/null)"
+          inspect_rc=$?
+          set -e
+          echo "digest=$promoted_digest" >> "$GITHUB_OUTPUT"
+          test "$create_rc" = 0
+          test "$inspect_rc" = 0
+          test "$promoted_digest" = "$CANDIDATE_DIGEST"
+
+      - name: Record tested build and promotion evidence
+        id: record_evidence
+        if: always() && steps.smoke_image.outcome == 'success' && steps.smoke_sentinel.outcome == 'success'
+        env:
+          IMAGE: ${{ env.SMOKE_IMAGE }}
+          BUILD_DIGEST: ${{ env.BUILD_DIGEST }}
+          COMMIT_TAG: sha-${{ github.sha }}
+          COMMIT_PROMOTION: ${{ steps.promote_commit.outcome }}
+          COMMIT_TAG_DIGEST: ${{ steps.promote_commit.outputs.digest }}
+          LATEST_PROMOTION: ${{ steps.promote_latest.outcome }}
+          LATEST_TAG_DIGEST: ${{ steps.promote_latest.outputs.digest }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            candidate_upload=uploaded_untagged
+            if [ "$COMMIT_TAG_DIGEST" = "$BUILD_DIGEST" ] \
+              && [ "$LATEST_TAG_DIGEST" = "$BUILD_DIGEST" ]; then
+              promotion_status=complete
+            elif [ "$COMMIT_TAG_DIGEST" = "$BUILD_DIGEST" ] \
+              || [ "$LATEST_TAG_DIGEST" = "$BUILD_DIGEST" ]; then
+              promotion_status=partial
+            else
+              promotion_status=failed
+            fi
+          else
+            candidate_upload=local_only
+            promotion_status=not_applicable
+          fi
+          jq -n \
+            --arg image "$IMAGE" \
+            --arg digest "$BUILD_DIGEST" \
+            --arg commit "$GITHUB_SHA" \
+            --arg platform "linux/amd64" \
+            --arg candidateUpload "$candidate_upload" \
+            --arg promotionStatus "$promotion_status" \
+            --arg commitTag "$COMMIT_TAG" \
+            --arg commitPromotion "$COMMIT_PROMOTION" \
+            --arg commitTagDigest "$COMMIT_TAG_DIGEST" \
+            --arg latestPromotion "$LATEST_PROMOTION" \
+            --arg latestTagDigest "$LATEST_TAG_DIGEST" \
+            --argjson buildSeconds "$(( $(date +%s) - BUILD_STARTED_AT ))" \
+            '{schemaVersion:"agora.image-build-evidence.v1", image:$image,
+              buildDigest:$digest, testedDigest:$digest, knownGoodDigest:$digest,
+              sourceCommit:$commit, platform:$platform,
+              candidateUpload:{status:$candidateUpload},
+              testing:{imageRuntime:"passed",machineSentinel:"passed"},
+              promotion:{status:$promotionStatus,commitTag:$commitTag,
+                commitOutcome:$commitPromotion,
+                commitTagDigest:$commitTagDigest,latestTag:"latest",
+                latestOutcome:$latestPromotion,latestTagDigest:$latestTagDigest},
+              buildAndSmokeSeconds:$buildSeconds}' \
+            > image-build-evidence.json
+
+      - name: Fail incomplete release promotion
+        if: always() && github.event_name == 'push' && steps.smoke_image.outcome == 'success' && steps.smoke_sentinel.outcome == 'success' && (steps.promote_commit.outcome != 'success' || steps.promote_latest.outcome != 'success')
+        run: |
+          printf '%s\n' 'tested digest promotion was incomplete; see uploaded evidence' >&2
+          exit 1
+
+      - name: Upload build and container evidence
+        if: always() && steps.record_evidence.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-image-evidence-${{ github.sha }}
+          path: |
+            image-build-evidence.json
+            image-smoke-evidence.json
+          if-no-files-found: error

@@ -1,0 +1,10 @@
+**
+!Dockerfile
+!image-repair-build-requirements.txt
+!start.sh
+!image-runtime/
+!image-runtime/**
+!machine-runtime/
+!machine-runtime/**
+**/__pycache__/
+**/*.pyc
