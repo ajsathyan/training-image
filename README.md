@@ -24,6 +24,27 @@ The build verifies those identities, the runtime manifest, Python 3.13/PyTorch
 2.11, the canonical repair backend imports, and the installed Agora import
 paths. Normal boot does not clone, fetch, pull, or run pip.
 
+## Build cache and runner disk
+
+The workflow treats the public `latest` manifest as an optional BuildKit inline
+cache. It resolves that tag once to an immutable digest, imports only that exact
+digest, and still completes a cold build when the lookup is missing or times out.
+Release builds embed cache metadata in the same untagged candidate that is
+smoked before promotion; the cache never authorizes publication and pull-request
+builds remain local.
+
+Hosted-runner preparation keeps a conservative 96 GiB free-space budget across
+the filesystems backing the workspace, Docker data, and temporary exports. It
+prunes Docker first and removes only reviewed optional SDK directories until the
+budget is met. It refuses non-hosted runners and never deletes the hosted
+toolcache. Uploaded timing and disk samples are phase-boundary observations, not
+measurements of transient peak usage.
+
+Cache reuse is a speed aid, not compatibility proof. A new training repository,
+base, dependency set, or runtime export still requires its normal source review
+and full image smoke. Cold base downloads and the final large-image load or pull
+remain expensive even when Dockerfile execution is cached.
+
 ## Machine-image contract
 
 The baked marker is `/opt/agora-image-runtime/capability.json`, schema

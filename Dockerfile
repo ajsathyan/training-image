@@ -3,13 +3,6 @@ ARG UPSTREAM_IMAGE=ghcr.io/pluralisresearch/agora-test@sha256:da54b2e3e37b90f9f6
 FROM ${UPSTREAM_IMAGE}
 
 ARG TARGETARCH
-ARG TRAINING_REPO_URL=https://github.com/PluralisResearch/agora-test.git
-ARG TRAINING_REPO_REF=71a44b894100baa8f2996b97e73ae0bd67fa6b9d
-ARG FLEET_SOURCE_COMMIT=3df74741f9f3faf3eebe036e6c0750887d905e71
-ARG FLEET_SOURCE_TREE=e1f2e90e79af7ae5a16bd5c84acaf7eac31ffca2
-ARG FLEET_SOURCE_ARTIFACT_FINGERPRINT=6267c9555c9cab647127ae123fd18329c11cb8b075b4983ae25b1d2b5fbd4a1a
-ARG PX0_VERSION=0.1.6
-ARG PX0_SHA256=d4f2378a1d6fbda9960cc7da45a5e3b5a5f9f6b331be80bcbb8a27f9dc5e9e0c
 
 ENV DEBIAN_FRONTEND=noninteractive \
     VIRTUAL_ENV=/opt/agora-venv \
@@ -17,16 +10,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     AGORA_MACHINE_RUNTIME_DIR=/opt/agora-machine-runtime \
     AGORA_TRAINING_SOURCE_DIR=/opt/agora-source \
     AGORA_PYTHON_BIN=/opt/agora-venv/bin/python
-
-LABEL io.agora.image.platform="linux/amd64" \
-      io.agora.training.repository="${TRAINING_REPO_URL}" \
-      io.agora.training.revision="${TRAINING_REPO_REF}" \
-      io.agora.fleet.commit="${FLEET_SOURCE_COMMIT}" \
-      io.agora.fleet.tree="${FLEET_SOURCE_TREE}" \
-      io.agora.image.contract="agora.machine-image-capability.v1" \
-      io.agora.fleet.source-artifact-fingerprint="${FLEET_SOURCE_ARTIFACT_FINGERPRINT}" \
-      io.agora.px0.version="${PX0_VERSION}" \
-      io.agora.px0.sha256="${PX0_SHA256}"
 
 COPY image-repair-build-requirements.txt /tmp/image-repair-build-requirements.txt
 
@@ -66,6 +49,9 @@ assert importlib.metadata.version("hatchling") == "1.27.0"
 assert importlib.metadata.version("editables") == "0.5"
 PY
 
+ARG TRAINING_REPO_URL=https://github.com/PluralisResearch/agora-test.git
+ARG TRAINING_REPO_REF=71a44b894100baa8f2996b97e73ae0bd67fa6b9d
+
 RUN git clone --filter=blob:none --no-checkout "$TRAINING_REPO_URL" /opt/agora-source \
     && git -C /opt/agora-source fetch --depth 1 origin "$TRAINING_REPO_REF" \
     && git -C /opt/agora-source checkout --detach "$TRAINING_REPO_REF" \
@@ -85,11 +71,18 @@ for module in (pithos, agora_server, agora):
     pathlib.Path(module.__file__).resolve().relative_to(root)
 PY
 
+ARG PX0_VERSION=0.1.6
+ARG PX0_SHA256=d4f2378a1d6fbda9960cc7da45a5e3b5a5f9f6b331be80bcbb8a27f9dc5e9e0c
+
 RUN curl -fsSLo /tmp/px0 "https://github.com/px0-ai/px0/releases/download/v${PX0_VERSION}/px0-${PX0_VERSION}-linux-amd64" \
     && printf '%s  /tmp/px0\n' "$PX0_SHA256" | sha256sum -c - \
     && install -m 0755 /tmp/px0 /usr/local/bin/px0 \
     && rm -f /tmp/px0 \
     && px0 -version
+
+ARG FLEET_SOURCE_COMMIT=3df74741f9f3faf3eebe036e6c0750887d905e71
+ARG FLEET_SOURCE_TREE=e1f2e90e79af7ae5a16bd5c84acaf7eac31ffca2
+ARG FLEET_SOURCE_ARTIFACT_FINGERPRINT=6267c9555c9cab647127ae123fd18329c11cb8b075b4983ae25b1d2b5fbd4a1a
 
 COPY machine-runtime /opt/agora-machine-runtime
 COPY image-runtime /opt/agora-image-runtime
@@ -199,6 +192,16 @@ capability = {
     json.dumps(capability, indent=2, sort_keys=True) + "\n", encoding="utf-8"
 )
 PY
+
+LABEL io.agora.image.platform="linux/amd64" \
+      io.agora.training.repository="${TRAINING_REPO_URL}" \
+      io.agora.training.revision="${TRAINING_REPO_REF}" \
+      io.agora.fleet.commit="${FLEET_SOURCE_COMMIT}" \
+      io.agora.fleet.tree="${FLEET_SOURCE_TREE}" \
+      io.agora.image.contract="agora.machine-image-capability.v1" \
+      io.agora.fleet.source-artifact-fingerprint="${FLEET_SOURCE_ARTIFACT_FINGERPRINT}" \
+      io.agora.px0.version="${PX0_VERSION}" \
+      io.agora.px0.sha256="${PX0_SHA256}"
 
 WORKDIR /workspace
 
