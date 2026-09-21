@@ -782,7 +782,6 @@ for _ in $(seq 1 20); do
 done
 docker exec "$configured" test -s /workspace/agora-run/machine-sentinel/events.jsonl
 events_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/machine-sentinel/events.jsonl | awk '{print $1}')"
-events_size="$(docker exec "$configured" stat -c %s /workspace/agora-run/machine-sentinel/events.jsonl)"
 docker exec "$configured" cat /workspace/agora-run/machine-sentinel/events.jsonl \
   > "$work/events-before-restart.jsonl"
 receipt_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/bootstrap-receipt.json | awk '{print $1}')"
@@ -805,12 +804,24 @@ ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
 test "$(docker exec "$configured" git -C /opt/agora-source rev-parse HEAD)" = "$repaired_source_commit"
 test "$(docker exec "$configured" sha256sum /workspace/agora-run/bootstrap-receipt.json | awk '{print $1}')" = "$receipt_hash"
 docker exec "$configured" test -s /workspace/agora-run/machine-sentinel/events.jsonl
+docker exec "$configured" jq -e \
+  '.process.observedAt | type == "string" and length > 0' \
+  /workspace/agora-run/machine-sentinel/state.json >/dev/null
+process_observed_after_restart="$(docker exec "$configured" jq -r \
+  '.process.observedAt' /workspace/agora-run/machine-sentinel/state.json)"
 for _ in $(seq 1 20); do
-  current_events_size="$(docker exec "$configured" stat -c %s /workspace/agora-run/machine-sentinel/events.jsonl)"
-  if [ "$current_events_size" -gt "$events_size" ]; then break; fi
+  if docker exec "$configured" jq -e --arg before "$process_observed_after_restart" '
+    .process.observedAt as $after |
+    (($after | type) == "string") and $after > $before and
+    .process.tmuxAgora == false
+  ' /workspace/agora-run/machine-sentinel/state.json >/dev/null; then break; fi
   sleep 1
 done
-test "$current_events_size" -gt "$events_size"
+docker exec "$configured" jq -e --arg before "$process_observed_after_restart" '
+  .process.observedAt as $after |
+  (($after | type) == "string") and $after > $before and
+  .process.tmuxAgora == false
+' /workspace/agora-run/machine-sentinel/state.json >/dev/null
 events_prefix_size="$(wc -c < "$work/events-before-restart.jsonl" | tr -d '[:space:]')"
 docker exec "$configured" head -c "$events_prefix_size" \
   /workspace/agora-run/machine-sentinel/events.jsonl \
