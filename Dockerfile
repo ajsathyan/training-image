@@ -5,9 +5,9 @@ FROM ${UPSTREAM_IMAGE}
 ARG TARGETARCH
 ARG TRAINING_REPO_URL=https://github.com/PluralisResearch/agora-test.git
 ARG TRAINING_REPO_REF=71a44b894100baa8f2996b97e73ae0bd67fa6b9d
-ARG FLEET_SOURCE_COMMIT=becf930c74e00b30c096fe7f009dabc694ad42b1
-ARG FLEET_SOURCE_TREE=b8713aaa1362d7265ffc6b76c6b4751d4a261618
-ARG FLEET_SOURCE_ARTIFACT_FINGERPRINT=0d9a9d9aa4e56ee67e3e12e10ced3e850736d227aabed98dc28416bd547b5f1e
+ARG FLEET_SOURCE_COMMIT=3df74741f9f3faf3eebe036e6c0750887d905e71
+ARG FLEET_SOURCE_TREE=e1f2e90e79af7ae5a16bd5c84acaf7eac31ffca2
+ARG FLEET_SOURCE_ARTIFACT_FINGERPRINT=6267c9555c9cab647127ae123fd18329c11cb8b075b4983ae25b1d2b5fbd4a1a
 ARG PX0_VERSION=0.1.6
 ARG PX0_SHA256=d4f2378a1d6fbda9960cc7da45a5e3b5a5f9f6b331be80bcbb8a27f9dc5e9e0c
 
@@ -97,6 +97,7 @@ COPY start.sh /start.sh
 
 RUN chmod 755 /start.sh \
     /opt/agora-image-runtime/assignment_transition.py \
+    /opt/agora-image-runtime/agora_boot_start.py \
     /opt/agora-image-runtime/agora_image_bootstrap.py \
     /opt/agora-image-runtime/refresh_inspection.py \
     && install -m 0700 \
@@ -150,6 +151,11 @@ capability = {
     "bootstrap": {
         "path": "/opt/agora-image-runtime/agora_image_bootstrap.py",
         "sha256": digest(image_runtime_dir / "agora_image_bootstrap.py"),
+    },
+    "bootStart": {
+        "contractVersion": "agora.machine-boot-launch.v1",
+        "path": "/opt/agora-image-runtime/agora_boot_start.py",
+        "sha256": digest(image_runtime_dir / "agora_boot_start.py"),
     },
     "assignmentTransition": {
         "contractVersion": "agora.assignment-transition.v1",

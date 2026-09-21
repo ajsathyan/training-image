@@ -9,13 +9,65 @@ work="$(mktemp -d)"
 neutral="agora-image-neutral-$RANDOM"
 configured="agora-image-configured-$RANDOM"
 training="agora-image-training-fixture-$RANDOM"
+invalid="agora-image-invalid-autostart-$RANDOM"
 tunnel_pid=""
+failure_root="${SMOKE_FAILURE_ROOT:-$REPO_ROOT/.smoke-failures}"
+failed_line="unknown"
+failed_command="unknown"
+
+remember_failure() {
+  failed_line="$1"
+  failed_command="$2"
+}
+trap 'remember_failure "$LINENO" "$BASH_COMMAND"' ERR
+
+capture_failure() {
+  local name="$1"
+  local destination="$2"
+  if ! docker inspect "$name" >/dev/null 2>&1; then return 0; fi
+  mkdir -p "$destination/$name"
+  docker image inspect "$IMAGE" \
+    --format '{"id":"{{.Id}}","repoDigests":{{json .RepoDigests}}}' \
+    > "$destination/image-identity.json" || true
+  docker logs "$name" 2>&1 \
+    | sed -E 's/(hf_|heartbeat_fixture_|sentinel_fixture_)[A-Za-z0-9_.:-]+/[REDACTED]/g' \
+    > "$destination/$name/container.log" || true
+  docker exec "$name" sh -c '
+    for path in /run/agora-image-bootstrap.status /run/agora-image-bootstrap.status.json \
+      /workspace/agora-run/bootstrap-receipt.json; do
+      if test -f "$path"; then printf "== %s ==\n" "$path"; cat "$path"; fi
+    done
+    printf "== processes ==\n"
+    ps -eo pid=,ppid=,comm=,args= | grep -E "(sshd|cron|tmux|agora|python)" | head -80
+    printf "== ports ==\n"
+    ss -ltnp 2>/dev/null | head -80
+    printf "== bounded runtime logs ==\n"
+    for path in /var/log/agora-image-bootstrap.log \
+      /workspace/agora-run/progress.log /workspace/agora-run/watchdog.log \
+      /workspace/agora-run/logs/server_gpu0.log \
+      /workspace/agora-run/logs/launcher-gpu0.log \
+      /workspace/agora-run/logs/launcher-active.log; do
+      if test -f "$path"; then printf "%s\n" "-- $path --"; tail -n 120 "$path"; fi
+    done
+  ' 2>&1 \
+    | sed -E 's/(hf_|heartbeat_fixture_|sentinel_fixture_)[A-Za-z0-9_.:-]+/[REDACTED]/g' \
+    > "$destination/$name/runtime.txt" || true
+}
 
 cleanup() {
   status=$?
   if [ "$status" -ne 0 ]; then
-    docker logs "$neutral" 2>/dev/null || true
-    docker logs "$configured" 2>/dev/null || true
+    failure_dir="$failure_root/$(date -u +%Y%m%dT%H%M%SZ)-exit-$status"
+    mkdir -p "$failure_dir"
+    printf '%s\n' "$status" > "$failure_dir/original-exit-status"
+    printf '%s\n' "$failed_line" > "$failure_dir/failed-line"
+    printf '%s\n' "$failed_command" \
+      | sed -E 's/(hf_|heartbeat_fixture_|sentinel_fixture_)[A-Za-z0-9_.:-]+/[REDACTED]/g' \
+      > "$failure_dir/failed-command"
+    for container in "$neutral" "$configured" "$training" "$invalid"; do
+      capture_failure "$container" "$failure_dir"
+    done
+    printf 'redacted smoke evidence retained at %s\n' "$failure_dir" >&2
   fi
   if [ -n "$tunnel_pid" ]; then kill "$tunnel_pid" >/dev/null 2>&1 || true; fi
   # Runtime privacy leaves nested fixture directories root-owned and 0700.
@@ -28,7 +80,7 @@ cleanup() {
   docker exec "$training" sh -c \
     'find /workspace/agora-run /run/agora-inspection -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +' \
     >/dev/null 2>&1 || true
-  docker rm -f "$neutral" "$configured" "$training" >/dev/null 2>&1 || true
+  docker rm -f "$neutral" "$configured" "$training" "$invalid" >/dev/null 2>&1 || true
   rm -rf "$work" >/dev/null 2>&1 || true
   exit "$status"
 }
@@ -95,6 +147,29 @@ ssh "${ssh_options[@]}" -p "$neutral_port" root@127.0.0.1 '
   pgrep -x sshd >/dev/null
   pgrep -x cron >/dev/null
 '
+
+invalid_secret="hf_invalid_smoke_secret_must_not_escape"
+docker run -d --name "$invalid" \
+  -e PUBLIC_KEY="$(cat "$work/id_ed25519.pub")" \
+  -e AGORA_BOOT_AUTOSTART=1 \
+  -e AGORA_BOOT_LAUNCH_B64=not-base64 \
+  -e AGORA_BOOT_HF_TOKEN="$invalid_secret" \
+  -p 127.0.0.1::22 \
+  "$IMAGE" >/dev/null
+invalid_port="$(host_port "$invalid")"
+wait_for_ssh "$invalid_port"
+wait_for_bootstrap "$invalid"
+docker exec "$invalid" jq -e \
+  '.state == "invalid_input" and (.reason | contains("launch envelope"))' \
+  /run/agora-image-bootstrap.status.json >/dev/null
+! docker logs "$invalid" 2>&1 | grep -F "$invalid_secret" >/dev/null
+! docker exec "$invalid" grep -aF "$invalid_secret" \
+  /proc/"$(docker exec "$invalid" pgrep -xo sshd)"/environ >/dev/null
+! docker exec "$invalid" tmux has-session -t agora_gpu 2>/dev/null
+capture_failure "$invalid" "$work/failure-capture-rehearsal"
+test -s "$work/failure-capture-rehearsal/image-identity.json"
+test -s "$work/failure-capture-rehearsal/$invalid/runtime.txt"
+! grep -R -F "$invalid_secret" "$work/failure-capture-rehearsal" >/dev/null
 
 state="$work/state"
 mkdir -p "$state/controller-input"
@@ -453,6 +528,24 @@ python3 "$REPO_ROOT/tests/generate_machine_image_config.py" config \
   --heartbeat "$work/training-heartbeat.json" \
   --transition-kind ready \
   --allow-absent
+training_launch_b64="$(python3 - "$training_state/controller-input/machine-config.json" "$training_token_hash" <<'PY'
+import base64
+import json
+import sys
+
+config = json.load(open(sys.argv[1], encoding="utf-8"))
+config.pop("providerResourceId", None)
+config.pop("announcePort", None)
+launch = {
+    "schemaVersion": "agora.machine-boot-launch.v1",
+    "tokenSha256": sys.argv[2],
+    "config": config,
+}
+print(base64.b64encode(json.dumps(launch, sort_keys=True, separators=(",", ":")).encode()).decode())
+PY
+)"
+rm "$training_state/controller-input/machine-config.json" \
+  "$training_state/controller-input/hf-token"
 cat > "$work/fake-agora-cli.py" <<'PY'
 import signal
 import time
@@ -481,6 +574,10 @@ chmod 644 "$work/fake-agora-cli.py"
 
 docker run -d --name "$training" \
   -e PUBLIC_KEY="$(cat "$work/id_ed25519.pub")" \
+  -e AGORA_BOOT_AUTOSTART=1 \
+  -e AGORA_BOOT_LAUNCH_B64="$training_launch_b64" \
+  -e AGORA_BOOT_HF_TOKEN=hf_fixture_training_token_456 \
+  -e AGORA_BOOT_METADATA_WAIT_SECONDS=30 \
   -v "$training_state:/workspace/agora-run" \
   -v "$bad_inspection:/run/agora-inspection" \
   -v "$work/fake-agora-cli.py:/opt/agora-source/agora_cli.py:ro" \
@@ -488,11 +585,15 @@ docker run -d --name "$training" \
   "$IMAGE" >/dev/null
 training_port="$(host_port "$training")"
 wait_for_ssh "$training_port"
+docker exec "$training" sh -c \
+  'printf "%s\n" "RUNPOD_POD_ID=pod-training-smoke" "RUNPOD_TCP_PORT_49200=55001" > /etc/rp_environment'
 wait_for_bootstrap "$training"
 ssh "${ssh_options[@]}" -p "$training_port" root@127.0.0.1 '
   set -Eeuo pipefail
   root=/workspace/agora-run
   test "$(cat /run/agora-image-bootstrap.status)" = 0
+  jq -e '\'' .state == "ready" and .selection == "launch" '\'' \
+    /run/agora-image-bootstrap.status.json >/dev/null
   jq -e '\''
     .status == "ready" and .training.requested == true and .training.status == "started" and
     .heartbeat.requested == true and .heartbeat.status == "started" and
@@ -522,18 +623,35 @@ ssh "${ssh_options[@]}" -p "$training_port" root@127.0.0.1 '
   test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_sentinel)" = 1
   ! tmux has-session -t agora_px0 2>/dev/null
   grep -Fq "attempt=1 exit=17" "$root/progress.log"
+  ! grep -R -F "hf_fixture_training_token_456" \
+    /run/agora-image-bootstrap.status.json "$root/bootstrap-receipt.json" \
+    /var/log/agora-image-bootstrap.log "$root/progress.log"
+  for process in "$(pgrep -xo sshd)" "$(pgrep -xo cron || true)"; do
+    test -z "$process" || ! grep -aF "hf_fixture_training_token_456" "/proc/$process/environ"
+  done
+  for process in $(pgrep -f "agora_cli.py|agora_heartbeat_agent.py|agora_machine_sentinel_agent.py" || true); do
+    if test -r "/proc/$process/environ"; then
+      ! grep -aF "hf_fixture_training_token_456" "/proc/$process/environ"
+      ! grep -aF "AGORA_BOOT_LAUNCH_B64=" "/proc/$process/environ"
+    fi
+  done
   printf "%s\n" "$third_pid" > "$root/fake-running-pid"
 '
-cp -p "$training_state/controller-input/machine-config.json" "$work/training-ready-config.json"
+docker exec "$training" cat /workspace/agora-run/controller-input/machine-config.json \
+  > "$work/training-ready-config.json"
 python3 "$REPO_ROOT/tests/generate_machine_image_config.py" config \
   --machine "$work/training-machine.json" \
   --token-sha256 "$training_token_hash" \
-  --output "$training_state/controller-input/machine-config.json" \
+  --output "$work/training-stage-config.json" \
   --heartbeat "$work/training-heartbeat.json" \
   --transition-kind stage \
   --expected-machine "$work/training-machine.json" \
   --expected-token-sha256 "$training_token_hash" \
   --expected-state ready
+docker cp "$work/training-stage-config.json" \
+  "$training:/workspace/agora-run/controller-input/.machine-config.stage"
+docker exec "$training" sh -c \
+  'chmod 600 /workspace/agora-run/controller-input/.machine-config.stage && mv /workspace/agora-run/controller-input/.machine-config.stage /workspace/agora-run/controller-input/machine-config.json'
 docker exec "$training" /opt/agora-venv/bin/python \
   /opt/agora-image-runtime/agora_image_bootstrap.py \
   > "$work/image-smoke-ready-stage-replay.log" 2>&1
@@ -545,7 +663,10 @@ docker exec "$training" jq -e '.status == "ready" and
   /workspace/agora-run/bootstrap-receipt.json >/dev/null
 test "$(docker exec "$training" sh -c 'ps -eo pid=,args= | awk '\''$2 == "/opt/agora-venv/bin/python" && $3 == "agora_cli.py" {print $1; exit}'\''')" \
   = "$(docker exec "$training" cat /workspace/agora-run/fake-running-pid)"
-mv "$work/training-ready-config.json" "$training_state/controller-input/machine-config.json"
+docker cp "$work/training-ready-config.json" \
+  "$training:/workspace/agora-run/controller-input/.machine-config.ready"
+docker exec "$training" sh -c \
+  'chmod 600 /workspace/agora-run/controller-input/.machine-config.ready && mv /workspace/agora-run/controller-input/.machine-config.ready /workspace/agora-run/controller-input/machine-config.json'
 training_identity_hash="$(docker exec "$training" sha256sum /workspace/agora-run/private_gpu0.key | awk '{print $1}')"
 for _ in $(seq 1 30); do
   if docker exec "$training" jq -e '.nextSeq >= 1' \
@@ -579,6 +700,27 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 test "$heartbeat_seq_after" -gt "$heartbeat_seq_before"
+
+# A durable pause marker must outrank the saved ready config on reboot. SSH
+# remains available, no owned trainer restarts, and configured observation does.
+docker exec "$training" sh -c \
+  'jq '\'' .desiredState = "paused" '\'' /workspace/agora-run/training-intent.json > /workspace/agora-run/.training-intent.paused && chmod 600 /workspace/agora-run/.training-intent.paused && mv /workspace/agora-run/.training-intent.paused /workspace/agora-run/training-intent.json'
+heartbeat_seq_pause_before="$(docker exec "$training" jq -r .nextSeq /workspace/agora-run/heartbeat-agent/state.json)"
+docker exec "$training" rm -f /run/agora-image-bootstrap.status
+docker restart "$training" >/dev/null
+training_port="$(host_port "$training")"
+wait_for_ssh "$training_port"
+wait_for_bootstrap "$training"
+docker exec "$training" jq -e '.state == "stopped" and (.reason | contains("pause"))' \
+  /run/agora-image-bootstrap.status.json >/dev/null
+! docker exec "$training" tmux has-session -t agora_gpu 2>/dev/null
+docker exec "$training" tmux has-session -t agora_heartbeat 2>/dev/null
+for _ in $(seq 1 20); do
+  heartbeat_seq_paused="$(docker exec "$training" jq -r .nextSeq /workspace/agora-run/heartbeat-agent/state.json)"
+  if [ "$heartbeat_seq_paused" -gt "$heartbeat_seq_pause_before" ]; then break; fi
+  sleep 1
+done
+test "$heartbeat_seq_paused" -gt "$heartbeat_seq_pause_before"
 
 docker image inspect "$IMAGE" --format '{{json .Config.ExposedPorts}}' \
   | jq -e 'keys == ["22/tcp", "49200/tcp"]' >/dev/null
@@ -652,13 +794,34 @@ wait_for_bootstrap "$configured"
 ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   set -Eeuo pipefail
   test "$(cat /run/agora-image-bootstrap.status)" = 0
-  test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_sentinel)" = 1
-  test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_px0)" = 1
-  jq -e '\''.status == "ready" and .assignmentGeneration == 4 and
-    .runtimeTrainingSource.status == "approved_repair"'\'' /workspace/agora-run/bootstrap-receipt.json >/dev/null
+  jq -e '\''.state == "stopped" and (.reason | contains("assignment"))'\'' \
+    /run/agora-image-bootstrap.status.json >/dev/null
+  tmux has-session -t agora_sentinel 2>/dev/null
+  tmux has-session -t agora_inspection 2>/dev/null
+  tmux has-session -t agora_px0 2>/dev/null
+  ! tmux has-session -t agora_gpu 2>/dev/null
 '
 test "$(docker exec "$configured" git -C /opt/agora-source rev-parse HEAD)" = "$repaired_source_commit"
+test "$(docker exec "$configured" sha256sum /workspace/agora-run/bootstrap-receipt.json | awk '{print $1}')" = "$receipt_hash"
 docker exec "$configured" test -s /workspace/agora-run/machine-sentinel/events.jsonl
+docker exec "$configured" jq -e \
+  '.process.observedAt | type == "string" and length > 0' \
+  /workspace/agora-run/machine-sentinel/state.json >/dev/null
+process_observed_after_restart="$(docker exec "$configured" jq -r \
+  '.process.observedAt' /workspace/agora-run/machine-sentinel/state.json)"
+for _ in $(seq 1 20); do
+  if docker exec "$configured" jq -e --arg before "$process_observed_after_restart" '
+    .process.observedAt as $after |
+    (($after | type) == "string") and $after > $before and
+    .process.tmuxAgora == false
+  ' /workspace/agora-run/machine-sentinel/state.json >/dev/null; then break; fi
+  sleep 1
+done
+docker exec "$configured" jq -e --arg before "$process_observed_after_restart" '
+  .process.observedAt as $after |
+  (($after | type) == "string") and $after > $before and
+  .process.tmuxAgora == false
+' /workspace/agora-run/machine-sentinel/state.json >/dev/null
 events_prefix_size="$(wc -c < "$work/events-before-restart.jsonl" | tr -d '[:space:]')"
 docker exec "$configured" head -c "$events_prefix_size" \
   /workspace/agora-run/machine-sentinel/events.jsonl \
@@ -683,6 +846,8 @@ jq -n \
     timings:{pullSeconds:$pullSeconds, neutralSshReadySeconds:$neutralSshReadySeconds,
     configuredReadySeconds:$configuredReadySeconds}, checks:{ssh:true, neutralBoot:true,
     configuredBootstrap:true, offlineTrainingStartAndRestart:true,
+    invalidOptInKeepsSsh:true,
+    pauseOutranksSavedReady:true,
     generatedIdentityRestart:true, heartbeatStartedAndPersistent:true, knownRepair:true,
     optionalFailureIndependence:true, restart:true, sentinelOutageSpool:true,
     px0LoopbackTunnel:true, px0PermittedRead:true, px0SourceMtime:true,

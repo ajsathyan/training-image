@@ -1,5 +1,5 @@
 {
-  "artifactFingerprint": "5d616e237d572bb7547ef72e41adc15ab813d31937b15c8796433d5f53daf0ee",
+  "artifactFingerprint": "f2f7be23a054bc2a8916bf59eaf1e495a86132c668953e2c2ae16166b2807062",
   "files": [
     {
       "kind": "generated_package_marker",
@@ -19,16 +19,16 @@
     {
       "kind": "source",
       "path": "scripts/agora_control/execution/assets.py",
-      "sha256": "7c99b11a8788858fec84cdad18962cc6773761849237f2a99e6e5353cfb90008",
+      "sha256": "ccd73f11155019cb3131148ce08e888d05e9f3f5bea3de0ef84596b626d5d9a8",
       "sourcePath": "scripts/agora_control/execution/assets.py",
-      "sourceSha256": "7c99b11a8788858fec84cdad18962cc6773761849237f2a99e6e5353cfb90008"
+      "sourceSha256": "ccd73f11155019cb3131148ce08e888d05e9f3f5bea3de0ef84596b626d5d9a8"
     },
     {
       "kind": "source",
       "path": "scripts/agora_control/execution/image_runtime.py",
-      "sha256": "c7b6751f68b59b0e686fde99a3084d265a51b9339478b4653f870716f38f5616",
+      "sha256": "9d05ca2bec02a15a52ce6fbcdbf19666aa938f2031571d5ad03d55b6c1e9d21f",
       "sourcePath": "scripts/agora_control/execution/image_runtime.py",
-      "sourceSha256": "c7b6751f68b59b0e686fde99a3084d265a51b9339478b4653f870716f38f5616"
+      "sourceSha256": "9d05ca2bec02a15a52ce6fbcdbf19666aa938f2031571d5ad03d55b6c1e9d21f"
     },
     {
       "kind": "renderer_dependency",
@@ -136,10 +136,10 @@
   ],
   "schemaVersion": "agora.machine-runtime-export.v1",
   "source": {
-    "artifactFingerprint": "0d9a9d9aa4e56ee67e3e12e10ced3e850736d227aabed98dc28416bd547b5f1e",
-    "commit": "becf930c74e00b30c096fe7f009dabc694ad42b1",
+    "artifactFingerprint": "6267c9555c9cab647127ae123fd18329c11cb8b075b4983ae25b1d2b5fbd4a1a",
+    "commit": "3df74741f9f3faf3eebe036e6c0750887d905e71",
     "manifestPath": "runtime/machine-runtime-source.v1.json",
-    "manifestSha256": "cfd864560656ad137cd7b678df80fef299b9cd1e525f2f7de96c27f0c627b23c",
-    "tree": "b8713aaa1362d7265ffc6b76c6b4751d4a261618"
+    "manifestSha256": "946a22598e6c7a18d148432970084b24edae60ea35dc5e59dff3156f18a2c18a",
+    "tree": "e1f2e90e79af7ae5a16bd5c84acaf7eac31ffca2"
   }
 }

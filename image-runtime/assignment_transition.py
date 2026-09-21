@@ -159,6 +159,46 @@ def _write_manifest(path: Path, value: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def private_atomic_write(path: Path, data: bytes, *, mode: int = 0o600) -> None:
+    """Write one private durable file with the assignment lock already held."""
+
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.next")
+    with temporary.open("wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.chmod(mode)
+    temporary.replace(path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+@contextlib.contextmanager
+def saved_assignment_observation(
+    root: Path, config: dict[str, Any]
+) -> Iterator[dict[str, Any]]:
+    """Hold the assignment lock and prove config names the exact saved binding.
+
+    Observation services may be restored while training is intentionally stopped,
+    but only for the current durable assignment.  This deliberately performs no
+    assignment transition and writes no assignment or training state.
+    """
+
+    expected = assignment_binding(config)
+    with _assignment_lock(root):
+        current = _read_manifest(root / "assignment.json")
+        if current is None or not _same_binding(current, expected):
+            raise AssignmentTransitionError(
+                "saved observation configuration does not match the current assignment"
+            )
+        yield dict(current)
+
+
 @dataclass
 class AssignmentTransition:
     root: Path

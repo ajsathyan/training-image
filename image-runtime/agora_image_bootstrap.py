@@ -23,6 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from assignment_transition import (  # noqa: E402
     AssignmentTransitionError,
     assignment_transition,
+    private_atomic_write,
+    saved_assignment_observation,
     verify_assignment_postcondition,
 )
 
@@ -38,6 +40,7 @@ DEFAULT_TOKEN_PATH = f"{DEFAULT_REMOTE_ROOT}/controller-input/hf-token"
 DEFAULT_RECEIPT_PATH = f"{DEFAULT_REMOTE_ROOT}/bootstrap-receipt.json"
 DEFAULT_INSPECTION_ROOT = Path("/run/agora-inspection")
 CAPABILITY_PATH = Path("/opt/agora-image-runtime/capability.json")
+STAGING_ROOT = Path(os.environ.get("AGORA_BOOT_STAGING_ROOT", "/run"))
 FIXED_HOST_PORT = 49200
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}$")
 
@@ -1081,13 +1084,72 @@ def _write_receipt(path: Path, payload: dict[str, Any]) -> None:
 
 def _record_optional(root: Path, name: str, operation: Any) -> dict[str, str]:
     try:
-        operation()
+        result = operation()
+        if isinstance(result, dict) and isinstance(result.get("status"), str):
+            return dict(result)
         return {"status": "ready"}
     except Exception as exc:  # Optional diagnostics must not block core setup.
         message = f"{name} unavailable: {exc}"
-        with (root / "progress.log").open("a", encoding="utf-8") as handle:
-            handle.write(message + "\n")
+        try:
+            with (root / "progress.log").open("a", encoding="utf-8") as handle:
+                handle.write(message + "\n")
+        except OSError:
+            pass
         return {"status": "unavailable", "detail": str(exc)[:500]}
+
+
+def _training_intent(root: Path) -> dict[str, Any] | None:
+    path = root / "training-intent.json"
+    if not path.exists():
+        return None
+    try:
+        if path.is_symlink() or stat.S_IMODE(path.stat().st_mode) != 0o600:
+            raise BootstrapError("training intent must be a regular 0600 file")
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BootstrapError("training intent is unavailable or invalid") from exc
+    if (
+        not isinstance(value, dict)
+        or value.get("desiredState") not in {"running", "paused"}
+        or not isinstance(value.get("assignmentGeneration"), int)
+        or isinstance(value.get("assignmentGeneration"), bool)
+        or value["assignmentGeneration"] < 1
+        or not IDENTIFIER.fullmatch(str(value.get("operationId") or ""))
+    ):
+        raise BootstrapError("training intent is invalid")
+    return value
+
+
+def _commit_controller_input(
+    root: Path, config_path: Path, token_path: Path, config: dict[str, Any], token: str
+) -> None:
+    canonical = root / "controller-input"
+    canonical_config = canonical / "machine-config.json"
+    canonical_token = canonical / "hf-token"
+    config_bytes = (
+        json.dumps(config, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    private_atomic_write(canonical_config, config_bytes)
+    private_atomic_write(canonical_token, (token + "\n").encode("utf-8"))
+    if config_path.resolve() != canonical_config.resolve():
+        config_path.unlink(missing_ok=True)
+    if token_path.resolve() != canonical_token.resolve():
+        token_path.unlink(missing_ok=True)
+
+
+def _write_training_intent(root: Path, config: dict[str, Any]) -> None:
+    payload = {
+        "schemaVersion": 1,
+        "assignmentGeneration": config["assignmentGeneration"],
+        "operationId": config["assignmentOperationId"],
+        "desiredState": "running" if config["startTraining"] else "paused",
+    }
+    private_atomic_write(
+        root / "training-intent.json",
+        (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        ),
+    )
 
 
 def _arguments() -> argparse.Namespace:
@@ -1095,6 +1157,21 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=Path(DEFAULT_CONFIG_PATH))
     parser.add_argument("--token-file", type=Path, default=Path(DEFAULT_TOKEN_PATH))
     parser.add_argument("--receipt", type=Path, default=Path(DEFAULT_RECEIPT_PATH))
+    parser.add_argument(
+        "--persist-input",
+        action="store_true",
+        help="Commit staged config and token only after assignment arbitration.",
+    )
+    parser.add_argument(
+        "--boot-resume",
+        action="store_true",
+        help="Require a ready, unpaused saved assignment while holding its lock.",
+    )
+    parser.add_argument(
+        "--observation-resume",
+        action="store_true",
+        help="Restore optional observation for the exact saved assignment without training.",
+    )
     return parser.parse_args()
 
 
@@ -1115,17 +1192,53 @@ def main() -> int:
         capability, capability_hash = _capability()
         _verify_declared_capability(config, capability)
         token_path = args.token_file.resolve()
-        try:
-            token_path.relative_to((root / "controller-input").resolve())
-        except ValueError as exc:
-            raise BootstrapError(
-                "HF token file must be under controller-input"
-            ) from exc
+        if args.persist_input:
+            try:
+                token_path.relative_to(STAGING_ROOT.resolve())
+                args.config.resolve().relative_to(STAGING_ROOT.resolve())
+            except ValueError as exc:
+                raise BootstrapError(
+                    "staged boot input must be under /run"
+                ) from exc
+            if token_path.parent != args.config.resolve().parent:
+                raise BootstrapError("staged boot config and token must share a directory")
+        else:
+            try:
+                token_path.relative_to((root / "controller-input").resolve())
+            except ValueError as exc:
+                raise BootstrapError(
+                    "HF token file must be under controller-input"
+                ) from exc
         token = _secret_file(token_path, "HF token")
         normalized, root = _validated(config, token)
         assets, remote_assets = _load_runtime_modules()
         root.mkdir(parents=True, exist_ok=True)
         _source, commit = _verify_baked_training_source()
+        if args.observation_resume:
+            if args.persist_input or args.boot_resume:
+                raise BootstrapError("observation resume cannot change assignment state")
+            with saved_assignment_observation(root, normalized):
+                if normalized["heartbeat"]["mode"] == "configured":
+                    _record_optional(
+                        root, "heartbeat", lambda: _heartbeat(root, normalized, assets)
+                    )
+                _record_optional(
+                    root,
+                    "sentinel",
+                    lambda: _sentinel(root, normalized, remote_assets),
+                )
+                inspection = _record_optional(
+                    root, "inspection", lambda: _refresh_inspection(root, capability)
+                )
+                if normalized["px0Enabled"] and inspection["status"] == "ready":
+                    _record_optional(
+                        root, "px0", lambda: _px0(root, True, capability)
+                    )
+            print(
+                "agora image runtime: observation restored "
+                f"machine={normalized['machineId']} root={root} commit={commit}"
+            )
+            return 0
         with assignment_transition(
             root,
             normalized,
@@ -1133,6 +1246,14 @@ def main() -> int:
                 root, decision
             ),
         ) as transition:
+            intent = _training_intent(root)
+            if (args.persist_input or args.boot_resume) and transition.current is not None:
+                if transition.current.get("state") != "ready":
+                    raise BootstrapError(
+                        "saved staged or fenced assignment outranks boot launch input"
+                    )
+                if intent is not None and intent["desiredState"] == "paused":
+                    raise BootstrapError("saved paused training intent outranks boot launch input")
             preserved_ready = (
                 transition.kind == "stage"
                 and transition.idempotent
@@ -1152,9 +1273,19 @@ def main() -> int:
                 rollback_authorized=transition.rollback_authorized,
             )
             identity = _check_private_identity(root, normalized)
+            if args.persist_input:
+                _commit_controller_input(
+                    root, args.config, args.token_file, config, token
+                )
             if not preserved_ready:
                 _materialize_state(root, normalized, token, commit)
                 _render_training_assets(root, normalized, assets)
+            if not (
+                preserved_ready
+                and intent is not None
+                and intent["desiredState"] == "running"
+            ):
+                _write_training_intent(root, normalized)
             assignment_manifest = transition.commit()
         training = {
             "requested": normalized["startTraining"],
@@ -1204,7 +1335,18 @@ def main() -> int:
                 for name in ("sentinel", "inspection", "px0")
             }
         else:
-            heartbeat = _heartbeat(root, normalized, assets)
+            if normalized["heartbeat"]["mode"] == "disabled":
+                heartbeat = {"requested": False, "status": "disabled"}
+            else:
+                heartbeat_outcome = _record_optional(
+                    root,
+                    "heartbeat",
+                    lambda: _heartbeat(root, normalized, assets),
+                )
+                heartbeat = {
+                    "requested": True,
+                    **heartbeat_outcome,
+                }
             inspection = _record_optional(
                 root, "inspection", lambda: _refresh_inspection(root, capability)
             )
@@ -1292,6 +1434,10 @@ def main() -> int:
         OSError,
         ValueError,
     ) as exc:
+        if args.observation_resume:
+            # Observation restoration is not assignment/training setup and
+            # never owns the canonical bootstrap receipt, including failures.
+            raise
         _write_receipt(
             receipt_path,
             {
