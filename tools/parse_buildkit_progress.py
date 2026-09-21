@@ -13,9 +13,12 @@ from typing import Any
 
 HEADER = re.compile(r"^(#\d+) (?:\[[^]]+\] )?(.+)$")
 DURATION = re.compile(r"^(#\d+) DONE ([0-9]+(?:\.[0-9]+)?)s$")
+INLINE_DURATION = re.compile(
+    r"^(#\d+) preparing layers for inline cache ([0-9]+(?:\.[0-9]+)?)s done$"
+)
 
 
-def parse_progress(text: str) -> dict[str, Any]:
+def parse_progress(text: str, *, cache_export_expected: bool = False) -> dict[str, Any]:
     vertices: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for line in text.splitlines():
@@ -29,6 +32,14 @@ def parse_progress(text: str) -> dict[str, Any]:
         if duration:
             vertex, seconds = duration.groups()
             vertices.setdefault(vertex, {"vertex": vertex, "description": "unknown", "seconds": None})
+            vertices[vertex]["seconds"] = float(seconds)
+        inline_duration = INLINE_DURATION.match(line)
+        if inline_duration:
+            vertex, seconds = inline_duration.groups()
+            vertices.setdefault(
+                vertex,
+                {"vertex": vertex, "description": "preparing layers for inline cache", "seconds": None},
+            )
             vertices[vertex]["seconds"] = float(seconds)
 
     categories = {
@@ -48,7 +59,7 @@ def parse_progress(text: str) -> dict[str, Any]:
             category = "unmeasured"
         elif "importing cache manifest" in description:
             category = "cacheImportSeconds"
-        elif "exporting cache" in description:
+        elif "exporting cache" in description or "inline cache" in description:
             category = "cacheExportSeconds"
         elif "load metadata for" in description or description.startswith("FROM "):
             category = "baseDownloadSeconds"
@@ -62,9 +73,22 @@ def parse_progress(text: str) -> dict[str, Any]:
         records.append(record)
         if seconds is not None and category in categories:
             categories[category] += seconds
+    cache_records = [record for record in records if record["category"] == "cacheExportSeconds"]
+    if cache_records and all(record["seconds"] is not None for record in cache_records):
+        cache_export_availability = "measured"
+    elif cache_export_expected:
+        cache_export_availability = "not_separately_observable"
+        categories["cacheExportSeconds"] = None
+    else:
+        cache_export_availability = "not_applicable"
+        categories["cacheExportSeconds"] = None
     return {
         "metricSemantics": "sum of BuildKit vertex DONE durations; concurrent vertices may overlap",
-        "categories": {key: round(value, 3) for key, value in categories.items()},
+        "categories": {
+            key: round(value, 3) if value is not None else None
+            for key, value in categories.items()
+        },
+        "cacheExportAvailability": cache_export_availability,
         "vertices": records,
     }
 
@@ -76,6 +100,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--exit-status", type=int, required=True)
     parser.add_argument("--wall-seconds", type=float, required=True)
+    parser.add_argument(
+        "--inline-cache-export",
+        choices=("expected", "not-applicable"),
+        required=True,
+    )
     arguments = parser.parse_args()
     raw_log = arguments.log.read_text(encoding="utf-8", errors="replace")
     metadata: Any = None
@@ -85,7 +114,10 @@ def main() -> int:
             metadata = json.loads(raw_metadata)
         except json.JSONDecodeError as error:
             metadata = {"parseError": str(error), "rawPrefix": raw_metadata[:2000]}
-    value = parse_progress(raw_log)
+    value = parse_progress(
+        raw_log,
+        cache_export_expected=arguments.inline_cache_export == "expected",
+    )
     value.update(
         {
             "schemaVersion": "agora.buildkit-phase-evidence.v1",

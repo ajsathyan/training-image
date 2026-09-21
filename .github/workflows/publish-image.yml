@@ -158,7 +158,8 @@ jobs:
           python3 tools/parse_buildkit_progress.py \
             --log buildkit-progress.log --metadata build-metadata.json \
             --output buildkit-phase-evidence.json \
-            --exit-status "$build_rc" --wall-seconds "$wall_seconds"
+            --exit-status "$build_rc" --wall-seconds "$wall_seconds" \
+            --inline-cache-export not-applicable
           if [ "$build_rc" = 0 ]; then
             digest="$(jq -r '."containerimage.digest"' build-metadata.json)"
             test -n "$digest" && test "$digest" != null
@@ -194,7 +195,8 @@ jobs:
           python3 tools/parse_buildkit_progress.py \
             --log buildkit-progress.log --metadata build-metadata.json \
             --output buildkit-phase-evidence.json \
-            --exit-status "$build_rc" --wall-seconds "$wall_seconds"
+            --exit-status "$build_rc" --wall-seconds "$wall_seconds" \
+            --inline-cache-export expected
           if [ "$build_rc" = 0 ]; then
             digest="$(jq -r '."containerimage.digest"' build-metadata.json)"
             test -n "$digest" && test "$digest" != null

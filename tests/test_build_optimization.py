@@ -110,7 +110,8 @@ class BuildEvidenceTests(unittest.TestCase):
                     "#5 exporting cache to client directory",
                     "#5 DONE 0.2s",
                 ]
-            )
+            ),
+            cache_export_expected=True,
         )
         self.assertEqual(
             parsed["categories"],
@@ -123,6 +124,24 @@ class BuildEvidenceTests(unittest.TestCase):
                 "unclassifiedSeconds": 0.0,
             },
         )
+        self.assertEqual(parsed["cacheExportAvailability"], "measured")
+
+    def test_inline_cache_unknown_is_not_reported_as_zero(self) -> None:
+        parsed = parse_buildkit_progress.parse_progress(
+            "#7 preparing layers for inline cache\n",
+            cache_export_expected=True,
+        )
+        self.assertIsNone(parsed["categories"]["cacheExportSeconds"])
+        self.assertEqual(
+            parsed["cacheExportAvailability"], "not_separately_observable"
+        )
+        measured = parse_buildkit_progress.parse_progress(
+            "#7 preparing layers for inline cache\n"
+            "#7 preparing layers for inline cache 3.2s done\n",
+            cache_export_expected=True,
+        )
+        self.assertEqual(measured["categories"]["cacheExportSeconds"], 3.2)
+        self.assertEqual(measured["cacheExportAvailability"], "measured")
 
     def test_cache_probe_timeout_and_failure_fall_back_cold(self) -> None:
         def timeout(*args, **kwargs):
@@ -209,6 +228,19 @@ class DockerfileCacheContractTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(cache_rehearsal.RehearsalError, "no execution or cache"):
             cache_rehearsal.cache_statuses(headers)
+
+    def test_seed_builder_failure_stage_is_persisted_before_operation(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, stdout="fixture\n", stderr="")
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            cache_rehearsal, "_run", return_value=completed
+        ), mock.patch.object(
+            cache_rehearsal, "_builder", side_effect=cache_rehearsal.RehearsalError("setup failed")
+        ), mock.patch.object(cache_rehearsal.subprocess, "run", return_value=completed):
+            evidence = Path(temporary) / "evidence.json"
+            with self.assertRaisesRegex(cache_rehearsal.RehearsalError, "setup failed"):
+                cache_rehearsal.run_rehearsal(evidence, 1)
+            retained = json.loads(evidence.read_text(encoding="utf-8"))
+            self.assertEqual(retained["stage"], "seed-builder-setup")
 
 
 if __name__ == "__main__":

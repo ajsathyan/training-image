@@ -313,7 +313,7 @@ def _build(
         "log": completed.stdout,
         "metadata": metadata_value,
         "digest": digest,
-        "phases": parse_progress(completed.stdout),
+        "phases": parse_progress(completed.stdout, cache_export_expected=inline),
     }
 
 
@@ -434,6 +434,8 @@ def run_rehearsal(evidence_path: Path, repetitions: int) -> dict[str, Any]:
             f'[registry."{registry}:5000"]\n  http = true\n  insecure = true\n',
             encoding="utf-8",
         )
+        evidence["stage"] = "registry-setup"
+        _write_evidence(evidence_path, evidence)
         network_command = ["docker", "network", "create", network]
         setup_started = time.monotonic()
         network_result = _run(network_command, capture=True)
@@ -454,6 +456,7 @@ def run_rehearsal(evidence_path: Path, repetitions: int) -> dict[str, Any]:
             seed_builder = f"cache-seed-{token}"
             builders.append(seed_builder)
             evidence["stage"] = "seed-builder-setup"
+            _write_evidence(evidence_path, evidence)
             evidence["seedBuilderSetup"] = _builder(seed_builder, network, config)
             _write_evidence(evidence_path, evidence)
 
@@ -550,6 +553,7 @@ def run_rehearsal(evidence_path: Path, repetitions: int) -> dict[str, Any]:
                     builder = f"cache-{token}-{len(builders)}"
                     builders.append(builder)
                     evidence["stage"] = f"{case_name}:{repetition}:builder-setup"
+                    _write_evidence(evidence_path, evidence)
                     setup = _builder(builder, network, config)
                     evidence["stage"] = f"{case_name}:{repetition}:build"
                     result = _build(
