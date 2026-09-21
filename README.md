@@ -13,9 +13,9 @@ build and run fresh-container tests without pushing. Merges to `main` publish
 
 - upstream image: `ghcr.io/pluralisresearch/agora-test@sha256:da54b2e3e37b90f9f62d9a04546a95e3bd4711fb4641bd61c13e3db8561a1326`
 - Agora training source: `PluralisResearch/agora-test@71a44b894100baa8f2996b97e73ae0bd67fa6b9d`
-- fleet runtime: `ajsathyan/agora-runpod@906ebef7d04c43f73f173dfc8cab34b6b30940d2`
-- fleet source tree: `a0a337ae8ed84bfe4fd115a54ca07593d6aa6a12`
-- runtime export: `bde1307a1515581cc5f44bfd1308b08623f73e5453e085aa1ed37437b1fe4ce3`
+- fleet runtime: `ajsathyan/agora-runpod@3df74741f9f3faf3eebe036e6c0750887d905e71`
+- fleet source tree: `e1f2e90e79af7ae5a16bd5c84acaf7eac31ffca2`
+- runtime export: `f2f7be23a054bc2a8916bf59eaf1e495a86132c668953e2c2ae16166b2807062`
 - px0: `v0.1.6`, verified by the SHA-256 in `Dockerfile`
 - in-place repair build tooling: exact wheel hashes in
   `image-repair-build-requirements.txt`
@@ -136,7 +136,7 @@ Use a fleet clone containing the reviewed exact commit:
 ```bash
 python3 tools/export_fleet_runtime.py \
   --source-repo /absolute/path/to/agora-runpod \
-  --source-commit 906ebef7d04c43f73f173dfc8cab34b6b30940d2 \
+  --source-commit 3df74741f9f3faf3eebe036e6c0750887d905e71 \
   --output-dir machine-runtime
 python3 -m unittest tests.test_runtime_export -v
 ```
