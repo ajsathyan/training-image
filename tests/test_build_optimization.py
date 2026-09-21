@@ -136,12 +136,15 @@ class BuildEvidenceTests(unittest.TestCase):
             parsed["cacheExportAvailability"], "not_separately_observable"
         )
         measured = parse_buildkit_progress.parse_progress(
+            "#7 exporting to image\n"
             "#7 preparing layers for inline cache\n"
-            "#7 preparing layers for inline cache 3.2s done\n",
+            "#7 preparing layers for inline cache 3.2s done\n"
+            "#7 DONE 4.0s\n",
             cache_export_expected=True,
         )
         self.assertEqual(measured["categories"]["cacheExportSeconds"], 3.2)
         self.assertEqual(measured["cacheExportAvailability"], "measured")
+        self.assertEqual(measured["categories"]["outputExportSeconds"], 4.0)
 
     def test_cache_probe_timeout_and_failure_fall_back_cold(self) -> None:
         def timeout(*args, **kwargs):

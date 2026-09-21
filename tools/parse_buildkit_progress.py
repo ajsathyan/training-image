@@ -21,7 +21,11 @@ INLINE_DURATION = re.compile(
 def parse_progress(text: str, *, cache_export_expected: bool = False) -> dict[str, Any]:
     vertices: dict[str, dict[str, Any]] = {}
     order: list[str] = []
+    inline_cache_seen = False
+    inline_substeps: list[dict[str, Any]] = []
     for line in text.splitlines():
+        if "preparing layers for inline cache" in line:
+            inline_cache_seen = True
         header = HEADER.match(line)
         if header and not line.startswith(header.group(1) + " DONE"):
             vertex, description = header.groups()
@@ -36,11 +40,9 @@ def parse_progress(text: str, *, cache_export_expected: bool = False) -> dict[st
         inline_duration = INLINE_DURATION.match(line)
         if inline_duration:
             vertex, seconds = inline_duration.groups()
-            vertices.setdefault(
-                vertex,
-                {"vertex": vertex, "description": "preparing layers for inline cache", "seconds": None},
+            inline_substeps.append(
+                {"vertex": vertex, "description": "preparing layers for inline cache", "seconds": float(seconds)}
             )
-            vertices[vertex]["seconds"] = float(seconds)
 
     categories = {
         "baseDownloadSeconds": 0.0,
@@ -74,9 +76,12 @@ def parse_progress(text: str, *, cache_export_expected: bool = False) -> dict[st
         if seconds is not None and category in categories:
             categories[category] += seconds
     cache_records = [record for record in records if record["category"] == "cacheExportSeconds"]
-    if cache_records and all(record["seconds"] is not None for record in cache_records):
+    if inline_substeps:
+        categories["cacheExportSeconds"] += sum(item["seconds"] for item in inline_substeps)
         cache_export_availability = "measured"
-    elif cache_export_expected:
+    elif cache_records and all(record["seconds"] is not None for record in cache_records):
+        cache_export_availability = "measured"
+    elif cache_export_expected or inline_cache_seen:
         cache_export_availability = "not_separately_observable"
         categories["cacheExportSeconds"] = None
     else:
@@ -89,6 +94,7 @@ def parse_progress(text: str, *, cache_export_expected: bool = False) -> dict[st
             for key, value in categories.items()
         },
         "cacheExportAvailability": cache_export_availability,
+        "inlineCacheSubsteps": inline_substeps,
         "vertices": records,
     }
 
