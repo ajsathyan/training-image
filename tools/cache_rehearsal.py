@@ -9,6 +9,7 @@ then uses an inline cache, a disposable registry, and fresh BuildKit builders.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -21,22 +22,48 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+try:
+    from parse_buildkit_progress import parse_progress
+except ModuleNotFoundError:  # Imported as tools.cache_rehearsal in source checks.
+    from tools.parse_buildkit_progress import parse_progress
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BOUNDARIES = ("os", "repair", "training", "px0", "runtime")
-LANDMARKS = {
-    "base": "FROM ${UPSTREAM_IMAGE}",
-    "repair-copy": "COPY image-repair-build-requirements.txt",
-    "os": 'RUN test "$TARGETARCH" = "amd64"',
-    "repair": "RUN /opt/agora-venv/bin/uv pip install",
-    "training-args": "ARG TRAINING_REPO_URL=",
-    "training": "RUN git clone",
-    "px0-args": "ARG PX0_VERSION=",
-    "px0": "RUN curl -fsSLo /tmp/px0",
-    "fleet-args": "ARG FLEET_SOURCE_COMMIT=",
-    "runtime-copy": "COPY machine-runtime",
-    "runtime": "RUN chmod 755 /start.sh",
-    "labels": "LABEL io.agora.image.platform",
+EXPECTED_STRUCTURE = (
+    ("ARG", "UPSTREAM_IMAGE"),
+    ("FROM", "${UPSTREAM_IMAGE}"),
+    ("ARG", "TARGETARCH"),
+    ("ENV", "DEBIAN_FRONTEND"),
+    ("COPY", "image-repair-build-requirements.txt"),
+    ("RUN", "os"),
+    ("RUN", "repair"),
+    ("ARG", "TRAINING_REPO_URL"),
+    ("ARG", "TRAINING_REPO_REF"),
+    ("RUN", "training"),
+    ("ARG", "PX0_VERSION"),
+    ("ARG", "PX0_SHA256"),
+    ("RUN", "px0"),
+    ("ARG", "FLEET_SOURCE_COMMIT"),
+    ("ARG", "FLEET_SOURCE_TREE"),
+    ("ARG", "FLEET_SOURCE_ARTIFACT_FINGERPRINT"),
+    ("COPY", "machine-runtime"),
+    ("COPY", "image-runtime"),
+    ("COPY", "start.sh"),
+    ("RUN", "runtime"),
+    ("LABEL", "io.agora.image.platform"),
+    ("WORKDIR", "/workspace"),
+    ("EXPOSE", "22"),
+    ("CMD", '["/start.sh"]'),
+)
+EARLY_LAYOUT_ARGS = {
+    "TRAINING_REPO_URL",
+    "TRAINING_REPO_REF",
+    "PX0_VERSION",
+    "PX0_SHA256",
+    "FLEET_SOURCE_COMMIT",
+    "FLEET_SOURCE_TREE",
+    "FLEET_SOURCE_ARTIFACT_FINGERPRINT",
 }
 
 
@@ -44,66 +71,163 @@ class RehearsalError(RuntimeError):
     pass
 
 
+def _parse_instructions(path: Path) -> list[dict[str, Any]]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    instructions: list[dict[str, Any]] = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if not stripped or stripped.startswith("#"):
+            index += 1
+            continue
+        match = re.match(r"^([A-Z]+)\s+(.+)$", lines[index])
+        if not match:
+            raise RehearsalError(f"unparsed Dockerfile line {index + 1}: {lines[index]}")
+        keyword = match.group(1)
+        start = index
+        raw = [lines[index]]
+        while raw[-1].rstrip().endswith("\\"):
+            index += 1
+            if index >= len(lines):
+                raise RehearsalError(f"unterminated continuation at line {start + 1}")
+            raw.append(lines[index])
+        heredoc = re.search(r"<<-?['\"]?([A-Za-z0-9_]+)['\"]?", "\n".join(raw))
+        if heredoc:
+            delimiter = heredoc.group(1)
+            while index + 1 < len(lines):
+                index += 1
+                raw.append(lines[index])
+                if lines[index].strip() == delimiter:
+                    break
+            else:
+                raise RehearsalError(f"unterminated heredoc at line {start + 1}")
+        instructions.append(
+            {
+                "keyword": keyword,
+                "raw": "\n".join(raw),
+                "startLine": start + 1,
+                "endLine": index + 1,
+            }
+        )
+        index += 1
+    return instructions
+
+
+def _identity(instruction: dict[str, Any]) -> tuple[str, str]:
+    keyword = instruction["keyword"]
+    raw = instruction["raw"]
+    first = raw.splitlines()[0].split(None, 1)[1]
+    if keyword == "ARG":
+        return keyword, first.split("=", 1)[0]
+    if keyword == "COPY":
+        return keyword, first.split()[0]
+    if keyword == "RUN":
+        if 'test "$TARGETARCH"' in raw:
+            return keyword, "os"
+        if "uv pip install" in raw:
+            return keyword, "repair"
+        if "git clone" in raw:
+            return keyword, "training"
+        if "curl -fsSLo /tmp/px0" in raw:
+            return keyword, "px0"
+        if "chmod 755 /start.sh" in raw:
+            return keyword, "runtime"
+        raise RehearsalError(f"unmapped RUN at line {instruction['startLine']}")
+    if keyword in {"ENV", "LABEL"}:
+        return keyword, first.split()[0].split("=", 1)[0]
+    return keyword, first.split()[0] if keyword == "EXPOSE" else first
+
+
 def inspect_real_dockerfile(path: Path) -> list[dict[str, Any]]:
-    text = path.read_text(encoding="utf-8")
+    instructions = _parse_instructions(path)
+    actual = [_identity(instruction) for instruction in instructions]
+    if actual != list(EXPECTED_STRUCTURE):
+        raise RehearsalError(
+            "real Dockerfile instruction structure drifted:\n"
+            f"expected={list(EXPECTED_STRUCTURE)!r}\nactual={actual!r}"
+        )
     mapping: list[dict[str, Any]] = []
-    previous = -1
-    for name, needle in LANDMARKS.items():
-        offset = text.find(needle)
-        if offset < 0:
-            raise RehearsalError(f"real Dockerfile landmark missing: {name}")
-        if offset <= previous:
-            raise RehearsalError(f"real Dockerfile landmark out of order: {name}")
-        previous = offset
+    for instruction, identity in zip(instructions, actual):
         mapping.append(
             {
-                "boundary": name,
-                "needle": needle,
-                "line": text.count("\n", 0, offset) + 1,
-                "byteOffset": offset,
+                "instruction": identity[0],
+                "input": identity[1],
+                "startLine": instruction["startLine"],
+                "endLine": instruction["endLine"],
+                "sourceSha256": hashlib.sha256(instruction["raw"].encode()).hexdigest(),
+                "modeledBoundary": _modeled_boundary(identity),
             }
         )
     return mapping
 
 
-def generated_dockerfile(*, old_layout: bool = False) -> str:
-    early = """
-ARG TRAINING_REPO_URL
-ARG TRAINING_REPO_REF
-ARG PX0_VERSION
-ARG PX0_SHA256
-ARG FLEET_SOURCE_COMMIT
-ARG FLEET_SOURCE_TREE
-ARG FLEET_SOURCE_ARTIFACT_FINGERPRINT
-""" if old_layout else ""
-    training = "" if old_layout else "ARG TRAINING_REPO_URL\nARG TRAINING_REPO_REF\n"
-    px0 = "" if old_layout else "ARG PX0_VERSION\nARG PX0_SHA256\n"
-    fleet = "" if old_layout else (
-        "ARG FLEET_SOURCE_COMMIT\nARG FLEET_SOURCE_TREE\n"
-        "ARG FLEET_SOURCE_ARTIFACT_FINGERPRINT\n"
-    )
-    return f"""# generated from the reviewed real-Dockerfile boundary map
-ARG UPSTREAM_IMAGE
-FROM ${{UPSTREAM_IMAGE}}
-ARG TARGETARCH
-{early}COPY image-repair-build-requirements.txt /inputs/requirements.txt
-RUN echo CACHE_BOUNDARY=os "$TARGETARCH" "${{FLEET_SOURCE_COMMIT:-}}" \
-      && cat /inputs/requirements.txt > /marker-os
-RUN echo CACHE_BOUNDARY=repair && cat /inputs/requirements.txt > /marker-repair
-{training}RUN echo CACHE_BOUNDARY=training "$TRAINING_REPO_URL" "$TRAINING_REPO_REF" \
-      | tee /marker-training
-{px0}RUN echo CACHE_BOUNDARY=px0 "$PX0_VERSION" "$PX0_SHA256" | tee /marker-px0
-{fleet}COPY machine-runtime /inputs/machine-runtime
-COPY image-runtime /inputs/image-runtime
-COPY start.sh /inputs/start.sh
-RUN echo CACHE_BOUNDARY=runtime "$FLEET_SOURCE_COMMIT" "$FLEET_SOURCE_TREE" \
-      "$FLEET_SOURCE_ARTIFACT_FINGERPRINT" \
-      && cat /inputs/machine-runtime/marker /inputs/image-runtime/marker \
-        /inputs/start.sh > /marker-runtime
-LABEL rehearsal.training="$TRAINING_REPO_REF" \
-      rehearsal.px0="$PX0_VERSION" \
-      rehearsal.fleet="$FLEET_SOURCE_COMMIT"
-"""
+def _modeled_boundary(identity: tuple[str, str]) -> str:
+    keyword, value = identity
+    if keyword in {"FROM"} or value == "UPSTREAM_IMAGE":
+        return "base"
+    if value in {"TARGETARCH", "DEBIAN_FRONTEND", "image-repair-build-requirements.txt"}:
+        return "os"
+    if value in {"os", "repair"}:
+        return value
+    if value.startswith("TRAINING_") or value == "training":
+        return "training"
+    if value.startswith("PX0_") or value == "px0":
+        return "px0"
+    if value.startswith("FLEET_") or value in {
+        "machine-runtime", "image-runtime", "start.sh", "runtime",
+        "io.agora.image.platform", "/workspace", "22", '["/start.sh"]',
+    }:
+        return "runtime"
+    raise RehearsalError(f"unmapped instruction identity: {identity}")
+
+
+def _emit(instruction: dict[str, Any]) -> str:
+    keyword, value = _identity(instruction)
+    if keyword == "ARG":
+        return f"ARG {value}"
+    if keyword == "FROM":
+        return "FROM ${UPSTREAM_IMAGE}"
+    if keyword == "ENV":
+        return "ENV REHEARSAL_ENV=1"
+    if keyword == "COPY":
+        destinations = {
+            "image-repair-build-requirements.txt": "/inputs/requirements.txt",
+            "machine-runtime": "/inputs/machine-runtime",
+            "image-runtime": "/inputs/image-runtime",
+            "start.sh": "/inputs/start.sh",
+        }
+        return f"COPY {value} {destinations[value]}"
+    if keyword == "RUN":
+        commands = {
+            "os": 'RUN echo CACHE_BOUNDARY=os "$TARGETARCH" | tee /marker-os && cat /inputs/requirements.txt >/dev/null',
+            "repair": "RUN echo CACHE_BOUNDARY=repair | tee /marker-repair && cat /inputs/requirements.txt >/dev/null",
+            "training": 'RUN echo CACHE_BOUNDARY=training "$TRAINING_REPO_URL" "$TRAINING_REPO_REF" | tee /marker-training',
+            "px0": 'RUN echo CACHE_BOUNDARY=px0 "$PX0_VERSION" "$PX0_SHA256" | tee /marker-px0',
+            "runtime": 'RUN echo CACHE_BOUNDARY=runtime "$FLEET_SOURCE_COMMIT" "$FLEET_SOURCE_TREE" "$FLEET_SOURCE_ARTIFACT_FINGERPRINT" | tee /marker-runtime && cat /inputs/machine-runtime/marker /inputs/image-runtime/marker /inputs/start.sh >/dev/null',
+        }
+        return commands[value]
+    if keyword == "LABEL":
+        return 'LABEL rehearsal.training="$TRAINING_REPO_REF" rehearsal.px0="$PX0_VERSION" rehearsal.fleet="$FLEET_SOURCE_COMMIT"'
+    if keyword == "WORKDIR":
+        return "WORKDIR /workspace"
+    if keyword == "EXPOSE":
+        return "EXPOSE 22 49200"
+    if keyword == "CMD":
+        return 'CMD ["sh"]'
+    raise RehearsalError(f"cannot emit instruction: {(keyword, value)}")
+
+
+def generated_dockerfile(path: Path = ROOT / "Dockerfile", *, old_layout: bool = False) -> str:
+    instructions = _parse_instructions(path)
+    inspect_real_dockerfile(path)
+    if old_layout:
+        early = [item for item in instructions if _identity(item) == ("ARG", "TARGETARCH")]
+        moved = [item for item in instructions if _identity(item)[0] == "ARG" and _identity(item)[1] in EARLY_LAYOUT_ARGS]
+        prefix = instructions[:2]
+        remaining = [item for item in instructions[2:] if item not in early and item not in moved]
+        instructions = prefix + early + moved + remaining
+    emitted = [_emit(instruction) for instruction in instructions]
+    return "# generated from every validated real Dockerfile instruction\n" + "\n".join(emitted) + "\n"
 
 
 def _run(
@@ -129,20 +253,28 @@ def _write_fixture(root: Path, dockerfile: str) -> None:
     (root / "start.sh").write_text("start-v1\n", encoding="utf-8")
 
 
-def _builder(name: str, network: str, config: Path) -> None:
-    _run(
-        [
-            "docker", "buildx", "create", "--name", name, "--driver", "docker-container",
-            "--driver-opt", f"network={network}", "--buildkitd-config", str(config), "--use",
-        ]
-    )
-    _run(["docker", "buildx", "inspect", "--builder", name, "--bootstrap"], capture=True)
+def _builder(name: str, network: str, config: Path) -> dict[str, Any]:
+    command = [
+        "docker", "buildx", "create", "--name", name, "--driver", "docker-container",
+        "--driver-opt", f"network={network}", "--buildkitd-config", str(config), "--use",
+    ]
+    started = time.monotonic()
+    created = _run(command, capture=True)
+    inspect_command = ["docker", "buildx", "inspect", "--builder", name, "--bootstrap"]
+    inspected = _run(inspect_command, capture=True)
+    return {
+        "seconds": round(time.monotonic() - started, 3),
+        "createCommand": command,
+        "inspectCommand": inspect_command,
+        "createLog": created.stdout,
+        "inspectLog": inspected.stdout,
+    }
 
 
 def _build(
     *, builder: str, context: Path, tag: str | None, cache_from: str | None,
     arguments: dict[str, str], metadata: Path | None = None, inline: bool = False,
-) -> tuple[float, str, str | None]:
+) -> dict[str, Any]:
     command = [
         "docker", "buildx", "build", "--builder", builder, "--progress=plain",
         "--platform", "linux/amd64",
@@ -161,12 +293,42 @@ def _build(
         command.extend(["--metadata-file", str(metadata)])
     command.append(str(context))
     started = time.monotonic()
-    completed = _run(command, capture=True)
-    seconds = time.monotonic() - started
+    completed = subprocess.run(
+        command,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    seconds = round(time.monotonic() - started, 3)
     digest = None
-    if metadata:
-        digest = json.loads(metadata.read_text(encoding="utf-8"))["containerimage.digest"]
-    return seconds, completed.stdout, digest
+    metadata_value = None
+    if metadata and metadata.exists():
+        metadata_value = json.loads(metadata.read_text(encoding="utf-8"))
+        digest = metadata_value.get("containerimage.digest")
+    return {
+        "command": command,
+        "exitStatus": completed.returncode,
+        "seconds": seconds,
+        "log": completed.stdout,
+        "metadata": metadata_value,
+        "digest": digest,
+        "phases": parse_progress(completed.stdout),
+    }
+
+
+def _require_build(name: str, result: dict[str, Any]) -> None:
+    if result["exitStatus"] != 0:
+        raise RehearsalError(
+            f"{name} build failed with exit {result['exitStatus']}\n{result['log']}"
+        )
+
+
+def _write_evidence(path: Path, evidence: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def cache_statuses(log: str) -> dict[str, str]:
@@ -188,7 +350,18 @@ def cache_statuses(log: str) -> dict[str, str]:
             re.match(rf"^{re.escape(vertex)} \d+(?:\.\d+)? CACHE_BOUNDARY={boundary}(?: |$)", line)
             for line in related
         )
-        statuses[boundary] = "ran" if executed else "cached"
+        explicit_cached = any(line == f"{vertex} CACHED" for line in related)
+        lazy_cached = any(" sha256:" in line for line in related) and any(
+            line.startswith(f"{vertex} DONE ") for line in related
+        )
+        if executed:
+            statuses[boundary] = "ran"
+        elif explicit_cached or lazy_cached:
+            statuses[boundary] = "cached"
+        else:
+            raise RehearsalError(
+                f"BuildKit vertex for {boundary} has no execution or cache completion oracle"
+            )
     return statuses
 
 
@@ -218,6 +391,9 @@ def run_rehearsal(evidence_path: Path, repetitions: int) -> dict[str, Any]:
     builders: list[str] = []
     evidence: dict[str, Any] = {
         "schemaVersion": "agora.cache-rehearsal.v1",
+        "status": "running",
+        "stage": "initialize",
+        "startedAtEpoch": int(time.time()),
         "productionPerformanceClaim": False,
         "modeledLimits": [
             "heavyweight commands are replaced by marker writes",
@@ -227,8 +403,18 @@ def run_rehearsal(evidence_path: Path, repetitions: int) -> dict[str, Any]:
         "realDockerfileMapping": mapping,
         "generatedCandidateDockerfile": generated_dockerfile(),
         "generatedOldLayoutDockerfile": generated_dockerfile(old_layout=True),
+        "inputIdentity": {
+            "sourceCommit": _run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture=True).stdout.strip(),
+            "sourceTree": _run(["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT, capture=True).stdout.strip(),
+            "dockerfileSha256": hashlib.sha256((ROOT / "Dockerfile").read_bytes()).hexdigest(),
+            "dockerVersion": _run(["docker", "version", "--format", "{{.Client.Version}}/{{.Server.Version}}"], capture=True).stdout.strip(),
+            "buildxVersion": _run(["docker", "buildx", "version"], capture=True).stdout.strip(),
+        },
+        "baseBuilds": [],
+        "seedBuilds": [],
         "cases": [],
     }
+    _write_evidence(evidence_path, evidence)
     with tempfile.TemporaryDirectory(prefix="agora-cache-rehearsal-") as temporary:
         root = Path(temporary)
         candidate = root / "candidate"
@@ -248,23 +434,34 @@ def run_rehearsal(evidence_path: Path, repetitions: int) -> dict[str, Any]:
             f'[registry."{registry}:5000"]\n  http = true\n  insecure = true\n',
             encoding="utf-8",
         )
-        _run(["docker", "network", "create", network], capture=True)
+        network_command = ["docker", "network", "create", network]
+        setup_started = time.monotonic()
+        network_result = _run(network_command, capture=True)
         try:
-            _run(
-                [
-                    "docker", "run", "-d", "--name", registry, "--network", network,
-                    "registry:2",
-                ],
-                capture=True,
-            )
+            registry_command = [
+                "docker", "run", "-d", "--name", registry, "--network", network,
+                "registry:2",
+            ]
+            registry_result = _run(registry_command, capture=True)
+            evidence["registrySetup"] = {
+                "seconds": round(time.monotonic() - setup_started, 3),
+                "networkCommand": network_command,
+                "networkLog": network_result.stdout,
+                "registryCommand": registry_command,
+                "registryLog": registry_result.stdout,
+            }
+            _write_evidence(evidence_path, evidence)
             seed_builder = f"cache-seed-{token}"
             builders.append(seed_builder)
-            _builder(seed_builder, network, config)
+            evidence["stage"] = "seed-builder-setup"
+            evidence["seedBuilderSetup"] = _builder(seed_builder, network, config)
+            _write_evidence(evidence_path, evidence)
 
             base_digests: list[str] = []
             for marker in ("base-a", "base-b"):
                 metadata = root / f"{marker}.json"
-                _, _, digest = _build(
+                evidence["stage"] = f"build-{marker}"
+                result = _build(
                     builder=seed_builder,
                     context=base,
                     tag=f"{prefix}:{marker}",
@@ -272,8 +469,12 @@ def run_rehearsal(evidence_path: Path, repetitions: int) -> dict[str, Any]:
                     arguments={"BUSYBOX_IMAGE": "busybox:1.36.1", "BASE_MARKER": marker},
                     metadata=metadata,
                 )
-                assert digest is not None
-                base_digests.append(digest)
+                evidence["baseBuilds"].append({"name": marker, **result})
+                _write_evidence(evidence_path, evidence)
+                _require_build(marker, result)
+                if not result["digest"]:
+                    raise RehearsalError(f"{marker} did not produce a digest")
+                base_digests.append(result["digest"])
 
             defaults = {
                 "UPSTREAM_IMAGE": f"{prefix}@{base_digests[0]}",
@@ -290,7 +491,8 @@ def run_rehearsal(evidence_path: Path, repetitions: int) -> dict[str, Any]:
             seeds: dict[str, str] = {}
             for layout, context in (("candidate", candidate), ("old", old)):
                 metadata = root / f"seed-{layout}.json"
-                _, log, digest = _build(
+                evidence["stage"] = f"seed-{layout}"
+                result = _build(
                     builder=seed_builder,
                     context=context,
                     tag=f"{prefix}:{layout}-seed",
@@ -299,10 +501,14 @@ def run_rehearsal(evidence_path: Path, repetitions: int) -> dict[str, Any]:
                     metadata=metadata,
                     inline=True,
                 )
-                assert digest is not None
-                seeds[layout] = f"type=registry,ref={prefix}@{digest}"
-                evidence[f"{layout}SeedDigest"] = digest
-                evidence[f"{layout}SeedStatuses"] = cache_statuses(log)
+                evidence["seedBuilds"].append({"name": layout, **result})
+                _write_evidence(evidence_path, evidence)
+                _require_build(f"seed-{layout}", result)
+                if not result["digest"]:
+                    raise RehearsalError(f"seed-{layout} did not produce a digest")
+                seeds[layout] = f"type=registry,ref={prefix}@{result['digest']}"
+                evidence[f"{layout}SeedDigest"] = result["digest"]
+                evidence[f"{layout}SeedStatuses"] = cache_statuses(result["log"])
 
             cases = [
                 ("unchanged-warm", candidate, seeds["candidate"], {}, None),
@@ -311,13 +517,25 @@ def run_rehearsal(evidence_path: Path, repetitions: int) -> dict[str, Any]:
                 ("repair-requirements", candidate, seeds["candidate"], {"requirements": "repair-v2"}, "os"),
                 ("training-ref", candidate, seeds["candidate"], {"TRAINING_REPO_REF": "training-v2"}, "training"),
                 ("px0-version", candidate, seeds["candidate"], {"PX0_VERSION": "0.1.7"}, "px0"),
+                ("px0-checksum", candidate, seeds["candidate"], {"PX0_SHA256": "px0-v2"}, "px0"),
                 ("base-digest", candidate, seeds["candidate"], {"UPSTREAM_IMAGE": f"{prefix}@{base_digests[1]}"}, "os"),
                 ("missing-cache", candidate, None, {}, "os"),
+                ("unavailable-cache-reference", candidate, f"type=registry,ref={prefix}@sha256:{'0' * 64}", {}, "os"),
                 ("old-layout-fleet-negative", old, seeds["old"], {"FLEET_SOURCE_COMMIT": "fleet-v2"}, "os"),
             ]
             for case_name, context, cache_from, changes, first_rerun in cases:
                 samples: list[float] = []
+                build_samples: list[float] = []
+                setup_samples: list[float] = []
                 statuses: list[dict[str, str]] = []
+                runs: list[dict[str, Any]] = []
+                case_evidence: dict[str, Any] = {
+                    "name": case_name,
+                    "status": "running",
+                    "runs": runs,
+                }
+                evidence["cases"].append(case_evidence)
+                _write_evidence(evidence_path, evidence)
                 for repetition in range(repetitions):
                     case_root = root / f"{case_name}-{repetition}"
                     shutil.copytree(context, case_root)
@@ -331,32 +549,43 @@ def run_rehearsal(evidence_path: Path, repetitions: int) -> dict[str, Any]:
                             arguments[key] = value
                     builder = f"cache-{token}-{len(builders)}"
                     builders.append(builder)
-                    _builder(builder, network, config)
-                    seconds, log, _ = _build(
+                    evidence["stage"] = f"{case_name}:{repetition}:builder-setup"
+                    setup = _builder(builder, network, config)
+                    evidence["stage"] = f"{case_name}:{repetition}:build"
+                    result = _build(
                         builder=builder,
                         context=case_root,
                         tag=None,
                         cache_from=cache_from,
                         arguments=arguments,
                     )
-                    actual = cache_statuses(log)
+                    runs.append({"repetition": repetition, "builderSetup": setup, "build": result})
+                    _write_evidence(evidence_path, evidence)
+                    _require_build(case_name, result)
+                    actual = cache_statuses(result["log"])
                     try:
                         _assert_statuses(case_name, actual, _expected(first_rerun))
                     except RehearsalError as error:
-                        raise RehearsalError(f"{error}\n--- BuildKit log ---\n{log}") from error
-                    samples.append(round(seconds, 3))
+                        raise RehearsalError(f"{error}\n--- BuildKit log ---\n{result['log']}") from error
+                    total_seconds = round(setup["seconds"] + result["seconds"], 3)
+                    samples.append(total_seconds)
+                    build_samples.append(result["seconds"])
+                    setup_samples.append(setup["seconds"])
                     statuses.append(actual)
                     _run(["docker", "buildx", "rm", "--force", builder], capture=True)
                     builders.remove(builder)
-                evidence["cases"].append(
+                case_evidence.update(
                     {
-                        "name": case_name,
-                        "samplesSeconds": samples,
-                        "medianSeconds": round(statistics.median(samples), 3),
-                        "rangeSeconds": [min(samples), max(samples)],
+                        "status": "passed",
+                        "samplesSecondsIncludingBuilderSetup": samples,
+                        "buildSamplesSeconds": build_samples,
+                        "builderSetupSamplesSeconds": setup_samples,
+                        "medianSecondsIncludingBuilderSetup": round(statistics.median(samples), 3),
+                        "rangeSecondsIncludingBuilderSetup": [min(samples), max(samples)],
                         "statuses": statuses,
                     }
                 )
+                _write_evidence(evidence_path, evidence)
         finally:
             for builder in reversed(builders):
                 subprocess.run(
@@ -377,9 +606,10 @@ def run_rehearsal(evidence_path: Path, repetitions: int) -> dict[str, Any]:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+    evidence["status"] = "passed"
+    evidence["stage"] = "complete"
     evidence["finishedAtEpoch"] = int(time.time())
-    evidence_path.parent.mkdir(parents=True, exist_ok=True)
-    evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_evidence(evidence_path, evidence)
     return evidence
 
 
@@ -388,7 +618,20 @@ def main() -> int:
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--repetitions", type=int, default=3)
     arguments = parser.parse_args()
-    run_rehearsal(arguments.evidence, arguments.repetitions)
+    try:
+        run_rehearsal(arguments.evidence, arguments.repetitions)
+    except BaseException as error:
+        if arguments.evidence.exists():
+            evidence = json.loads(arguments.evidence.read_text(encoding="utf-8"))
+        else:
+            evidence = {"schemaVersion": "agora.cache-rehearsal.v1"}
+        evidence["status"] = "failed"
+        evidence["failedStage"] = evidence.get("stage", "initialize")
+        evidence["errorType"] = type(error).__name__
+        evidence["error"] = str(error)
+        evidence["finishedAtEpoch"] = int(time.time())
+        _write_evidence(arguments.evidence, evidence)
+        raise
     return 0
 
 

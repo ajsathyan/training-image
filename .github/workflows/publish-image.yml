@@ -86,25 +86,13 @@ jobs:
         run: |
           python3 tools/build_evidence.py \
             --output image-build-timing-evidence.json start cache_lookup
-          set +e
-          digest="$(timeout 30s docker buildx imagetools inspect \
-            "${IMAGE_NAME}:latest" --format '{{.Manifest.Digest}}' 2>/dev/null)"
-          probe_rc=$?
-          set -e
-          if [ "$probe_rc" = 0 ] \
-            && printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
-            cache_ref="type=registry,ref=${IMAGE_NAME}@${digest}"
-            status=available
-            echo "cache_from=$cache_ref" >> "$GITHUB_OUTPUT"
-            echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          elif [ "$probe_rc" = 124 ]; then
-            cache_ref=""
-            status=timeout
-          else
-            cache_ref=""
-            status=unavailable
-          fi
-          echo "status=$status" >> "$GITHUB_OUTPUT"
+          python3 tools/resolve_registry_cache.py \
+            --image "$IMAGE_NAME" --timeout-seconds 30 \
+            --output cache-probe-evidence.json \
+            --github-output "$GITHUB_OUTPUT"
+          status="$(jq -r .status cache-probe-evidence.json)"
+          cache_ref="$(jq -r .reference cache-probe-evidence.json)"
+          probe_rc="$(jq -r .exitStatus cache-probe-evidence.json)"
           python3 tools/build_evidence.py \
             --output image-build-timing-evidence.json cache \
             --status "$status" --reference "$cache_ref" \
@@ -144,31 +132,75 @@ jobs:
       - name: Build local nonpublishing candidate
         if: github.event_name != 'push'
         id: build_local
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          push: false
-          load: true
-          platforms: linux/amd64
-          pull: true
-          cache-from: ${{ steps.cache_probe.outputs.cache_from }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+        env:
+          CACHE_FROM: ${{ steps.cache_probe.outputs.cache_from }}
+          IMAGE_LABELS: ${{ steps.meta.outputs.labels }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          build_args=(
+            --file Dockerfile --platform linux/amd64 --pull --load
+            --metadata-file build-metadata.json
+          )
+          if [ -n "$CACHE_FROM" ]; then build_args+=(--cache-from "$CACHE_FROM"); fi
+          while IFS= read -r label; do
+            if [ -n "$label" ]; then build_args+=(--label "$label"); fi
+          done <<< "$IMAGE_LABELS"
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then build_args+=(--tag "$tag"); fi
+          done <<< "$IMAGE_TAGS"
+          started="$(date +%s)"
+          set +e
+          docker buildx build "${build_args[@]}" --progress=plain . \
+            2>&1 | tee buildkit-progress.log
+          build_rc="${PIPESTATUS[0]}"
+          set -e
+          wall_seconds="$(( $(date +%s) - started ))"
+          python3 tools/parse_buildkit_progress.py \
+            --log buildkit-progress.log --metadata build-metadata.json \
+            --output buildkit-phase-evidence.json \
+            --exit-status "$build_rc" --wall-seconds "$wall_seconds"
+          if [ "$build_rc" = 0 ]; then
+            digest="$(jq -r '."containerimage.digest"' build-metadata.json)"
+            test -n "$digest" && test "$digest" != null
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$build_rc"
 
       - name: Upload untagged release candidate by digest
         if: github.event_name == 'push'
         id: build_release
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64
-          pull: true
-          cache-from: ${{ steps.cache_probe.outputs.cache_from }}
-          cache-to: type=inline
-          labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.IMAGE_NAME }},push=true,push-by-digest=true,name-canonical=true
+        env:
+          CACHE_FROM: ${{ steps.cache_probe.outputs.cache_from }}
+          IMAGE_LABELS: ${{ steps.meta.outputs.labels }}
+        run: |
+          build_args=(
+            --file Dockerfile --platform linux/amd64 --pull
+            --metadata-file build-metadata.json
+            --cache-to type=inline
+            --output "type=image,name=${IMAGE_NAME},push=true,push-by-digest=true,name-canonical=true"
+            --attest "type=provenance,mode=max,builder-id=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+          )
+          if [ -n "$CACHE_FROM" ]; then build_args+=(--cache-from "$CACHE_FROM"); fi
+          while IFS= read -r label; do
+            if [ -n "$label" ]; then build_args+=(--label "$label"); fi
+          done <<< "$IMAGE_LABELS"
+          started="$(date +%s)"
+          set +e
+          docker buildx build "${build_args[@]}" --progress=plain . \
+            2>&1 | tee buildkit-progress.log
+          build_rc="${PIPESTATUS[0]}"
+          set -e
+          wall_seconds="$(( $(date +%s) - started ))"
+          python3 tools/parse_buildkit_progress.py \
+            --log buildkit-progress.log --metadata build-metadata.json \
+            --output buildkit-phase-evidence.json \
+            --exit-status "$build_rc" --wall-seconds "$wall_seconds"
+          if [ "$build_rc" = 0 ]; then
+            digest="$(jq -r '."containerimage.digest"' build-metadata.json)"
+            test -n "$digest" && test "$digest" != null
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$build_rc"
 
       - name: Finish build timer
         if: always()
@@ -207,6 +239,7 @@ jobs:
           IMAGE: ${{ env.SMOKE_IMAGE }}
           BUILD_DIGEST: ${{ env.BUILD_DIGEST }}
           SMOKE_EVIDENCE: image-smoke-evidence.json
+          TIMING_EVIDENCE: ${{ github.workspace }}/image-build-timing-evidence.json
         run: |
           python3 tools/build_evidence.py \
             --output image-build-timing-evidence.json start image_smoke
@@ -355,6 +388,10 @@ jobs:
           path: |
             image-build-evidence.json
             image-build-timing-evidence.json
+            buildkit-phase-evidence.json
+            buildkit-progress.log
+            build-metadata.json
+            cache-probe-evidence.json
             image-smoke-evidence.json
             runner-preparation-evidence.json
             .smoke-failures/

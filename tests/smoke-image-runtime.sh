@@ -97,12 +97,22 @@ ssh_options=(
 
 pull_start="$(date +%s)"
 image_was_local=false
+pull_status=success
+if [ -n "${TIMING_EVIDENCE:-}" ]; then
+  python3 "$REPO_ROOT/tools/build_evidence.py" \
+    --output "$TIMING_EVIDENCE" start exact_image_pull
+fi
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
   image_was_local=true
 else
-  docker pull "$IMAGE" >/dev/null
+  if ! docker pull "$IMAGE" >/dev/null; then pull_status=failure; fi
 fi
 pull_finished="$(date +%s)"
+if [ -n "${TIMING_EVIDENCE:-}" ]; then
+  python3 "$REPO_ROOT/tools/build_evidence.py" \
+    --output "$TIMING_EVIDENCE" finish exact_image_pull --status "$pull_status"
+fi
+test "$pull_status" = success
 
 host_port() {
   docker inspect -f '{{(index (index .NetworkSettings.Ports "22/tcp") 0).HostPort}}' "$1"

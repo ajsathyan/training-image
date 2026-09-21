@@ -130,6 +130,89 @@ def _assert_safe_host() -> None:
         raise PreparationError("hosted toolcache must never be a cleanup target")
 
 
+def _mountpoints() -> list[Path]:
+    """Read decoded mountpoints without invoking a mutable helper."""
+    points: list[Path] = []
+    for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if len(fields) < 5:
+            continue
+        decoded = (
+            fields[4]
+            .replace("\\040", " ")
+            .replace("\\011", "\t")
+            .replace("\\012", "\n")
+            .replace("\\134", "\\")
+        )
+        points.append(Path(decoded))
+    return points
+
+
+def _contains_path(parent: Path, child: Path) -> bool:
+    try:
+        child.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_mutation_target(
+    path: Path, *, root_device: int, mountpoints: Iterable[Path]
+) -> dict[str, Any]:
+    if path.is_symlink():
+        raise PreparationError(f"refusing symlink mutation target: {path}")
+    if not path.exists():
+        raise PreparationError(f"mutation target does not exist: {path}")
+    resolved = path.resolve(strict=True)
+    metadata = resolved.stat()
+    if resolved != path or metadata.st_uid != 0 or not stat.S_ISDIR(metadata.st_mode):
+        raise PreparationError(f"unsafe mutation target: {path}")
+    if metadata.st_dev != root_device:
+        raise PreparationError(f"mutation target is not on the hosted root filesystem: {path}")
+    nested = [
+        str(mountpoint)
+        for mountpoint in mountpoints
+        if mountpoint != Path("/") and _contains_path(resolved, mountpoint)
+    ]
+    if nested:
+        raise PreparationError(
+            f"mutation target contains a mountpoint: {path}: {', '.join(nested)}"
+        )
+    return {"path": str(path), "resolvedPath": str(resolved), "deviceId": metadata.st_dev}
+
+
+def _docker_root() -> Path:
+    result = subprocess.run(
+        ["docker", "info", "--format", "{{.DockerRootDir}}"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    value = result.stdout.strip()
+    if value != "/var/lib/docker":
+        raise PreparationError(f"unexpected initial Docker root: {value!r}")
+    return Path(value)
+
+
+def _preflight_layout(github_env: Path) -> list[dict[str, Any]]:
+    if (
+        not github_env.is_absolute()
+        or github_env.is_symlink()
+        or not github_env.is_file()
+        or github_env.resolve(strict=True) != github_env
+    ):
+        raise PreparationError(f"refusing unsafe GITHUB_ENV: {github_env}")
+    root_device = os.stat("/").st_dev
+    mountpoints = _mountpoints()
+    targets = [Path("/mnt"), _docker_root()]
+    targets.extend(path for path in (Path("/mnt/docker"), Path("/mnt/tmp")) if path.exists())
+    targets.extend(path for path in CLEANUP_ALLOWLIST if path.exists())
+    return [
+        _validate_mutation_target(path, root_device=root_device, mountpoints=mountpoints)
+        for path in targets
+    ]
+
+
 def _safe_remove(candidate: Path) -> None:
     if candidate not in CLEANUP_ALLOWLIST:
         raise PreparationError(f"path is not allowlisted: {candidate}")
@@ -148,16 +231,6 @@ def _run(*command: str) -> None:
 
 
 def _prepare_mounts(github_env: Path) -> None:
-    if (
-        not github_env.is_absolute()
-        or github_env.is_symlink()
-        or not github_env.is_file()
-        or github_env.resolve(strict=True) != github_env
-    ):
-        raise PreparationError(f"refusing unsafe GITHUB_ENV: {github_env}")
-    for target in (Path("/mnt/docker"), Path("/mnt/tmp")):
-        if target.is_symlink() or (target.exists() and target.resolve(strict=True) != target):
-            raise PreparationError(f"unsafe hosted runner path: {target}")
     _run("systemctl", "stop", "docker")
     Path("/mnt/docker").mkdir(mode=0o755, parents=True, exist_ok=True)
     Path("/mnt/tmp").mkdir(mode=0o1777, parents=True, exist_ok=True)
@@ -197,6 +270,7 @@ def prepare(evidence_path: Path, github_env: Path) -> None:
             "runnerOs": os.environ["RUNNER_OS"],
             "platform": platform.system(),
         }
+        evidence["validatedMutationTargets"] = _preflight_layout(github_env)
         evidence["initialFilesystems"] = measure_filesystems((Path.cwd(), Path("/mnt")))
         current = evidence["initialFilesystems"]
         low = deficient_devices(current)
@@ -212,6 +286,10 @@ def prepare(evidence_path: Path, github_env: Path) -> None:
             evidence["commands"].append("docker system prune -af")
             _run("docker", "system", "prune", "-af")
             current = measure_filesystems((Path.cwd(), Path("/mnt")))
+            evidence.setdefault("cleanupMeasurements", []).append(
+                {"after": "docker system prune -af", "filesystems": current}
+            )
+            _record(evidence_path, evidence, "measured-after:docker-prune")
 
         for candidate in cleanup_candidates(path for path in CLEANUP_ALLOWLIST if path.exists()):
             if not deficient_devices(current):
@@ -220,6 +298,10 @@ def prepare(evidence_path: Path, github_env: Path) -> None:
             _safe_remove(candidate)
             evidence["deleted"].append(str(candidate))
             current = measure_filesystems((Path.cwd(), Path("/mnt")))
+            evidence.setdefault("cleanupMeasurements", []).append(
+                {"after": str(candidate), "filesystems": current}
+            )
+            _record(evidence_path, evidence, f"measured-after:{candidate}")
 
         _record(evidence_path, evidence, "relocate_docker")
         _prepare_mounts(github_env)
@@ -234,6 +316,7 @@ def prepare(evidence_path: Path, github_env: Path) -> None:
         evidence["finishedAtEpoch"] = int(time.time())
         _record(evidence_path, evidence, "complete")
     except BaseException as error:
+        evidence["failedStage"] = evidence.get("stage")
         evidence["status"] = "failed"
         evidence["errorType"] = type(error).__name__
         evidence["error"] = str(error)
@@ -241,7 +324,7 @@ def prepare(evidence_path: Path, github_env: Path) -> None:
             error.returncode if isinstance(error, subprocess.CalledProcessError) else 1
         )
         evidence["finishedAtEpoch"] = int(time.time())
-        _record(evidence_path, evidence, "failed")
+        _record(evidence_path, evidence, evidence["failedStage"])
         raise
 
 
