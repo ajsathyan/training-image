@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+
+# Shared rejecting assertions for image smoke tests. A negative observation is
+# proof only when the inspection command succeeds and the forbidden value is
+# absent; inspection errors must fail instead of being mistaken for absence.
+
+assert_absent_status() {
+  local label="$1"
+  shift
+  local status
+  if "$@" >/dev/null 2>&1; then
+    printf 'forbidden state present: %s\n' "$label" >&2
+    return 1
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 1 ]; then
+    return 0
+  fi
+  printf 'could not inspect forbidden state: %s (status %s)\n' \
+    "$label" "$status" >&2
+  return "$status"
+}
+
+assert_no_tmux_session() {
+  local label="$1"
+  local session="$2"
+  assert_absent_status "$label" tmux has-session -t "$session"
+}
+
+assert_no_docker_tmux_session() {
+  local label="$1"
+  local container="$2"
+  local session="$3"
+  local status
+  if docker exec "$container" sh -c '
+    tmux has-session -t "$1" >/dev/null 2>&1
+    status=$?
+    case "$status" in
+      0) exit 40 ;;
+      1) exit 41 ;;
+      *) exit 42 ;;
+    esac
+  ' sh "$session"; then
+    status=0
+  else
+    status=$?
+  fi
+  case "$status" in
+    41) return 0 ;;
+    40)
+      printf 'forbidden state present: %s\n' "$label" >&2
+      return 1
+      ;;
+    42)
+      printf 'container inspection failed: %s\n' "$label" >&2
+      return 1
+      ;;
+    *)
+      printf 'docker transport failed while inspecting: %s (status %s)\n' \
+        "$label" "$status" >&2
+      return 1
+      ;;
+  esac
+}
+
+assert_docker_file_lacks_fixed_text() {
+  local label="$1"
+  local container="$2"
+  local needle="$3"
+  local path="$4"
+  local status
+  if docker exec "$container" sh -c '
+    grep -aFq -- "$1" "$2"
+    status=$?
+    case "$status" in
+      0) exit 40 ;;
+      1) exit 41 ;;
+      *) exit 42 ;;
+    esac
+  ' sh "$needle" "$path"; then
+    status=0
+  else
+    status=$?
+  fi
+  case "$status" in
+    41) return 0 ;;
+    40)
+      printf 'forbidden text present: %s\n' "$label" >&2
+      return 1
+      ;;
+    42)
+      printf 'container file inspection failed: %s\n' "$label" >&2
+      return 1
+      ;;
+    *)
+      printf 'docker transport failed while inspecting: %s (status %s)\n' \
+        "$label" "$status" >&2
+      return 1
+      ;;
+  esac
+}
+
+assert_output_lacks_ere() {
+  local label="$1"
+  local pattern="$2"
+  shift 2
+  local output status
+  output="$(mktemp)"
+  if "$@" >"$output" 2>&1; then
+    :
+  else
+    status=$?
+    rm -f "$output"
+    printf 'could not inspect forbidden output: %s (status %s)\n' \
+      "$label" "$status" >&2
+    return "${status:-1}"
+  fi
+  if grep -Eq -- "$pattern" "$output"; then
+    rm -f "$output"
+    printf 'forbidden output present: %s\n' "$label" >&2
+    return 1
+  else
+    status=$?
+  fi
+  rm -f "$output"
+  if [ "$status" -eq 1 ]; then
+    return 0
+  fi
+  printf 'could not search inspected output: %s (status %s)\n' \
+    "$label" "$status" >&2
+  return "$status"
+}
+
+assert_output_lacks_fixed_text() {
+  local label="$1"
+  local needle="$2"
+  shift 2
+  local output status
+  output="$(mktemp)"
+  if "$@" >"$output" 2>&1; then
+    :
+  else
+    status=$?
+    rm -f "$output"
+    printf 'could not inspect forbidden output: %s (status %s)\n' \
+      "$label" "$status" >&2
+    return "${status:-1}"
+  fi
+  if grep -aFq -- "$needle" "$output"; then
+    rm -f "$output"
+    printf 'forbidden output present: %s\n' "$label" >&2
+    return 1
+  else
+    status=$?
+  fi
+  rm -f "$output"
+  if [ "$status" -eq 1 ]; then
+    return 0
+  fi
+  printf 'could not search inspected output: %s (status %s)\n' \
+    "$label" "$status" >&2
+  return "$status"
+}
+
+assert_output_empty() {
+  local label="$1"
+  shift
+  local output status
+  output="$(mktemp)"
+  if "$@" >"$output" 2>&1; then
+    :
+  else
+    status=$?
+    rm -f "$output"
+    printf 'could not inspect output: %s (status %s)\n' "$label" "$status" >&2
+    return "${status:-1}"
+  fi
+  if [ -s "$output" ]; then
+    rm -f "$output"
+    printf 'forbidden output present: %s\n' "$label" >&2
+    return 1
+  fi
+  rm -f "$output"
+}
+
+assert_no_fixed_text() {
+  local label="$1"
+  local needle="$2"
+  shift 2
+  local status
+  if grep -aFq -- "$needle" "$@"; then
+    printf 'forbidden text present: %s\n' "$label" >&2
+    return 1
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 1 ]; then
+    return 0
+  fi
+  printf 'could not inspect files for forbidden text: %s (status %s)\n' \
+    "$label" "$status" >&2
+  return "$status"
+}
+
+assert_no_fixed_text_recursive() {
+  local label="$1"
+  local needle="$2"
+  shift 2
+  local status
+  if grep -R -aFq -- "$needle" "$@"; then
+    printf 'forbidden text present: %s\n' "$label" >&2
+    return 1
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 1 ]; then
+    return 0
+  fi
+  printf 'could not inspect tree for forbidden text: %s (status %s)\n' \
+    "$label" "$status" >&2
+  return "$status"
+}
+
+assert_no_public_tcp_listener() {
+  local label="$1"
+  local port="$2"
+  assert_output_lacks_ere "$label" \
+    "(^|[[:space:]])(0\\.0\\.0\\.0|\\[::\\]|\\*):${port}[[:space:]]" \
+    ss -ltn
+}

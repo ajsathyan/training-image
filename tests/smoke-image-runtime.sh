@@ -5,6 +5,8 @@ IMAGE="${IMAGE:?IMAGE is required}"
 EVIDENCE="${SMOKE_EVIDENCE:-image-smoke-evidence.json}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=smoke-assertions.sh
+source "$SCRIPT_DIR/smoke-assertions.sh"
 work="$(mktemp -d)"
 neutral="agora-image-neutral-$RANDOM"
 configured="agora-image-configured-$RANDOM"
@@ -153,14 +155,19 @@ wait_for_bootstrap "$invalid"
 docker exec "$invalid" jq -e \
   '.state == "invalid_input" and (.reason | contains("launch envelope"))' \
   /run/agora-image-bootstrap.status.json >/dev/null
-! docker logs "$invalid" 2>&1 | grep -F "$invalid_secret" >/dev/null
-! docker exec "$invalid" grep -aF "$invalid_secret" \
-  /proc/"$(docker exec "$invalid" pgrep -xo sshd)"/environ >/dev/null
-! docker exec "$invalid" tmux has-session -t agora_gpu 2>/dev/null
+assert_output_lacks_fixed_text "invalid-launch container logs exclude HF token" \
+  "$invalid_secret" docker logs "$invalid"
+invalid_sshd_pid="$(docker exec "$invalid" pgrep -xo sshd)"
+assert_docker_file_lacks_fixed_text \
+  "invalid-launch sshd environment excludes HF token" \
+  "$invalid" "$invalid_secret" "/proc/$invalid_sshd_pid/environ"
+assert_no_docker_tmux_session "invalid launch has no trainer session" \
+  "$invalid" agora_gpu
 capture_failure "$invalid" "$work/failure-capture-rehearsal"
 test -s "$work/failure-capture-rehearsal/image-identity.json"
 test -s "$work/failure-capture-rehearsal/$invalid/runtime.txt"
-! grep -R -F "$invalid_secret" "$work/failure-capture-rehearsal" >/dev/null
+assert_no_fixed_text_recursive "failure evidence excludes invalid HF token" \
+  "$invalid_secret" "$work/failure-capture-rehearsal"
 
 state="$work/state"
 mkdir -p "$state/controller-input"
@@ -199,13 +206,50 @@ python3 "$REPO_ROOT/tests/generate_machine_image_config.py" config \
   --allow-absent
 config_hash="$(sha256sum "$state/controller-input/machine-config.json" | awk '{print $1}')"
 printf '%s\n' 'permitted-inspection-marker' > "$state/progress.log"
+active_root_state="$work/active-root-state"
+mkdir -p "$active_root_state"
+chmod 700 "$active_root_state"
+python3 - "$state/controller-input/machine-config.json" \
+  "$active_root_state/active-root.json" \
+  "$REPO_ROOT/image-runtime/agora_boot_start.py" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+
+config_path, pointer_path, boot_start_path = map(pathlib.Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("smoke_agora_boot_start", boot_start_path)
+if spec is None or spec.loader is None:
+    raise RuntimeError(f"cannot load production boot helper: {boot_start_path}")
+boot_start = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(boot_start)
+config = json.loads(config_path.read_text(encoding="utf-8"))
+identity_sha256 = boot_start._root_identity_digest(config)
+pointer = {
+    "schemaVersion": "agora.active-runtime-root.v1",
+    "remoteRoot": config["remoteRoot"],
+    "assignmentGeneration": config["assignmentGeneration"],
+    "assignmentOperationId": config["assignmentOperationId"],
+    "identitySha256": identity_sha256,
+}
+pointer_path.write_text(
+    json.dumps(pointer, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+pointer_path.chmod(0o600)
+PY
 
 configured_start="$(date +%s)"
 docker run -d --name "$configured" \
   -e PUBLIC_KEY="$(cat "$work/id_ed25519.pub")" \
+  -e RUNPOD_POD_ID=pod-smoke \
+  -e RUNPOD_TCP_PORT_49200=55001 \
   -v "$state:/workspace/agora-run" \
+  -v "$active_root_state:/var/lib/agora" \
   -p 127.0.0.1::22 \
   "$IMAGE" >/dev/null
+docker cp "$SCRIPT_DIR/smoke-assertions.sh" \
+  "$configured:/tmp/smoke-assertions.sh"
 configured_port="$(host_port "$configured")"
 wait_for_ssh "$configured_port"
 wait_for_bootstrap "$configured"
@@ -213,6 +257,7 @@ configured_ready="$(date +%s)"
 
 ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   set -Eeuo pipefail
+  source /tmp/smoke-assertions.sh
   trap '\''rc=$?; failed_line=$LINENO; failed_command=$BASH_COMMAND; set +e; \
     printf "configured smoke failed at line %s: %s\n" "$failed_line" "$failed_command" >&2; \
     jq -c "{status,training,optional,assignmentTransition,runtimeTrainingSource}" \
@@ -247,12 +292,21 @@ ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   test "$(stat -c %a /workspace/agora-run/controller-input/hf-token)" = 600
   test "$(stat -c %a /workspace/agora-run/agora.env)" = 600
   test "$(stat -c %a /workspace/agora-run/bootstrap-receipt.json)" = 600
+  test "$(stat -c %a /var/lib/agora)" = 700
+  test "$(stat -c %a /var/lib/agora/active-root.json)" = 600
+  jq -e '\''
+    .schemaVersion == "agora.active-runtime-root.v1" and
+    .remoteRoot == "/workspace/agora-run" and
+    .assignmentGeneration == 4 and
+    .assignmentOperationId == "assignment-operation-smoke"
+  '\'' /var/lib/agora/active-root.json >/dev/null
   test -x /workspace/agora-run/repair-agora-client.sh
   test -x /workspace/agora-run/supervise-agora-gpu0.sh
   test -x /workspace/agora-run/install-watchdog.sh
   test ! -e /run/agora-inspection/agora.env
   test ! -e /run/agora-inspection/hf-token
-  ! find /run/agora-inspection -type l -print -quit | grep -q .
+  assert_output_empty "inspection export contains no symlinks" \
+    find /run/agora-inspection -type l -print -quit
   # Bootstrap launches the inspection watcher and px0 asynchronously. Wait for
   # their exact postconditions instead of racing the first scheduler tick.
   for _ in $(seq 1 50); do
@@ -267,9 +321,9 @@ ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_sentinel)" = 1
   test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_px0)" = 1
   test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_inspection)" = 1
-  ! tmux has-session -t agora_gpu 2>/dev/null
+  assert_no_tmux_session "configured staged boot has no trainer" agora_gpu
   ss -ltn | grep -Eq '\''127\.0\.0\.1:7777[[:space:]]'\''
-  ! ss -ltn | grep -Eq '\''(0\.0\.0\.0|\[::\]):7777[[:space:]]'\''
+  assert_no_public_tcp_listener "px0 is not publicly exposed" 7777
   px0_pid="$(pgrep -x px0)"
   test "$(ps -o user= -p "$px0_pid" | xargs)" = agora-inspection
   tr '\''\0'\'' '\'' '\'' < "/proc/$px0_pid/cmdline" | grep -F -- "-no-agent" >/dev/null
@@ -574,6 +628,8 @@ docker run -d --name "$training" \
   -v "$work/fake-agora-cli.py:/opt/agora-source/agora_cli.py:ro" \
   -p 127.0.0.1::22 \
   "$IMAGE" >/dev/null
+docker cp "$SCRIPT_DIR/smoke-assertions.sh" \
+  "$training:/tmp/smoke-assertions.sh"
 training_port="$(host_port "$training")"
 wait_for_ssh "$training_port"
 docker exec "$training" sh -c \
@@ -581,6 +637,7 @@ docker exec "$training" sh -c \
 wait_for_bootstrap "$training"
 ssh "${ssh_options[@]}" -p "$training_port" root@127.0.0.1 '
   set -Eeuo pipefail
+  source /tmp/smoke-assertions.sh
   root=/workspace/agora-run
   test "$(cat /run/agora-image-bootstrap.status)" = 0
   jq -e '\'' .state == "ready" and .selection == "launch" '\'' \
@@ -612,19 +669,27 @@ ssh "${ssh_options[@]}" -p "$training_port" root@127.0.0.1 '
   test "$third_pid" != "$second_pid"
   test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_gpu)" = 1
   test "$(tmux list-sessions -F "#{session_name}" | grep -xc agora_sentinel)" = 1
-  ! tmux has-session -t agora_px0 2>/dev/null
+  assert_no_tmux_session "failed inspection prevents px0" agora_px0
   grep -Fq "attempt=1 exit=17" "$root/progress.log"
-  ! grep -R -F "hf_fixture_training_token_456" \
+  assert_no_fixed_text "runtime evidence excludes HF token" \
+    "hf_fixture_training_token_456" \
     /run/agora-image-bootstrap.status.json "$root/bootstrap-receipt.json" \
     /var/log/agora-image-bootstrap.log "$root/progress.log"
-  for process in "$(pgrep -xo sshd)" "$(pgrep -xo cron || true)"; do
-    test -z "$process" || ! grep -aF "hf_fixture_training_token_456" "/proc/$process/environ"
+  for process_name in sshd cron; do
+    process="$(pgrep -xo "$process_name")"
+    test -n "$process"
+    test -r "/proc/$process/environ"
+    assert_no_fixed_text "$process_name environment excludes HF token" \
+      "hf_fixture_training_token_456" "/proc/$process/environ"
   done
-  for process in $(pgrep -f "agora_cli.py|agora_heartbeat_agent.py|agora_machine_sentinel_agent.py" || true); do
-    if test -r "/proc/$process/environ"; then
-      ! grep -aF "hf_fixture_training_token_456" "/proc/$process/environ"
-      ! grep -aF "AGORA_BOOT_LAUNCH_B64=" "/proc/$process/environ"
-    fi
+  runtime_processes="$(pgrep -f "agora_cli.py|agora_heartbeat_agent.py|agora_machine_sentinel_agent.py")"
+  test -n "$runtime_processes"
+  for process in $runtime_processes; do
+    test -r "/proc/$process/environ"
+    assert_no_fixed_text "runtime process environment excludes HF token" \
+      "hf_fixture_training_token_456" "/proc/$process/environ"
+    assert_no_fixed_text "runtime process environment excludes launch envelope" \
+      "AGORA_BOOT_LAUNCH_B64=" "/proc/$process/environ"
   done
   printf "%s\n" "$third_pid" > "$root/fake-running-pid"
 '
@@ -704,7 +769,8 @@ wait_for_ssh "$training_port"
 wait_for_bootstrap "$training"
 docker exec "$training" jq -e '.state == "stopped" and (.reason | contains("pause"))' \
   /run/agora-image-bootstrap.status.json >/dev/null
-! docker exec "$training" tmux has-session -t agora_gpu 2>/dev/null
+assert_no_docker_tmux_session "paused reboot has no trainer session" \
+  "$training" agora_gpu
 docker exec "$training" tmux has-session -t agora_heartbeat 2>/dev/null
 for _ in $(seq 1 20); do
   heartbeat_seq_paused="$(docker exec "$training" jq -r .nextSeq /workspace/agora-run/heartbeat-agent/state.json)"
@@ -715,9 +781,13 @@ test "$heartbeat_seq_paused" -gt "$heartbeat_seq_pause_before"
 
 docker image inspect "$IMAGE" --format '{{json .Config.ExposedPorts}}' \
   | jq -e 'keys == ["22/tcp", "49200/tcp"]' >/dev/null
-test -z "$(docker inspect "$configured" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(HF_TOKEN|AGORA_SENTINEL_.*TOKEN|AGORA_HEARTBEAT_SECRET)=' || true)"
-! docker history --no-trunc "$IMAGE" | grep -F 'hf_fixture_training_token_123' >/dev/null
-! docker history --no-trunc "$IMAGE" | grep -F 'heartbeat_fixture_secret_456' >/dev/null
+assert_output_lacks_ere "configured container environment excludes runtime secrets" \
+  '^(HF_TOKEN|AGORA_SENTINEL_.*TOKEN|AGORA_HEARTBEAT_SECRET)=' \
+  docker inspect "$configured" --format '{{range .Config.Env}}{{println .}}{{end}}'
+assert_output_lacks_fixed_text "image history excludes configured HF token" \
+  'hf_fixture_training_token_123' docker history --no-trunc "$IMAGE"
+assert_output_lacks_fixed_text "image history excludes heartbeat secret" \
+  'heartbeat_fixture_secret_456' docker history --no-trunc "$IMAGE"
 
 tunnel_port="$(python3 - <<'PY'
 import socket
@@ -761,8 +831,12 @@ jq -e --arg expected "$expected_progress_mtime" \
   "$work/inspection-metadata.json" >/dev/null
 test "$(curl -sS -o "$work/traversal" -w '%{http_code}' "http://127.0.0.1:$tunnel_port/api/raw?path=../agora.env")" = 400
 test "$(curl -sS -o "$work/absolute" -w '%{http_code}' "http://127.0.0.1:$tunnel_port/api/file?path=/workspace/agora-run/agora.env")" = 400
-! grep -F 'hf_fixture_training_token_123' "$work/px0-meta.json" "$work/traversal" "$work/absolute"
-! grep -F 'sentinel_fixture_machine_token_123' "$work/px0-meta.json" "$work/traversal" "$work/absolute"
+assert_no_fixed_text "px0 responses exclude configured HF token" \
+  'hf_fixture_training_token_123' \
+  "$work/px0-meta.json" "$work/traversal" "$work/absolute"
+assert_no_fixed_text "px0 responses exclude Sentinel machine token" \
+  'sentinel_fixture_machine_token_123' \
+  "$work/px0-meta.json" "$work/traversal" "$work/absolute"
 kill "$tunnel_pid"
 tunnel_pid=""
 
@@ -784,13 +858,14 @@ wait_for_ssh "$configured_port"
 wait_for_bootstrap "$configured"
 ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
   set -Eeuo pipefail
+  source /tmp/smoke-assertions.sh
   test "$(cat /run/agora-image-bootstrap.status)" = 0
   jq -e '\''.state == "stopped" and (.reason | contains("assignment"))'\'' \
     /run/agora-image-bootstrap.status.json >/dev/null
   tmux has-session -t agora_sentinel 2>/dev/null
   tmux has-session -t agora_inspection 2>/dev/null
   tmux has-session -t agora_px0 2>/dev/null
-  ! tmux has-session -t agora_gpu 2>/dev/null
+  assert_no_tmux_session "stopped assignment has no trainer" agora_gpu
 '
 test "$(docker exec "$configured" git -C /opt/agora-source rev-parse HEAD)" = "$repaired_source_commit"
 test "$(docker exec "$configured" sha256sum /workspace/agora-run/bootstrap-receipt.json | awk '{print $1}')" = "$receipt_hash"
