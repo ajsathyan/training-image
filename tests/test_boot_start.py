@@ -135,6 +135,43 @@ class BootStartTests(unittest.TestCase):
                 self.assertEqual(boot.main({}), 0)
             self.assertEqual(json.loads(status.read_text())["state"], "stopped")
 
+    def test_manual_restart_rejects_pointer_identity_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "runtime"
+            canonical = root / "controller-input"
+            canonical.mkdir(parents=True)
+            config = {
+                "remoteRoot": str(root),
+                "machineId": "machine-a",
+                "provider": "runpod",
+                "accountScope": "runpod-1",
+                "providerResourceId": "pod-a",
+                "assignmentOperationId": "operation-a",
+                "assignmentGeneration": 1,
+            }
+            config_path = canonical / "machine-config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            config_path.chmod(0o600)
+            token_path = canonical / "hf-token"
+            token_path.write_text("fixture-token", encoding="utf-8")
+            token_path.chmod(0o600)
+            canonical.chmod(0o700)
+            pointer = base / "var" / "lib" / "agora" / "active-root.json"
+            with mock.patch.object(boot, "ACTIVE_ROOT_POINTER", pointer):
+                boot._record_active_root(config)
+                config_path.write_text(
+                    json.dumps({**config, "providerResourceId": "pod-other"}),
+                    encoding="utf-8",
+                )
+                config_path.chmod(0o600)
+                status = base / "status.json"
+                with mock.patch.object(boot, "STATUS", status):
+                    self.assertEqual(boot.main({}), 0)
+            value = json.loads(status.read_text(encoding="utf-8"))
+            self.assertEqual(value["state"], "stopped")
+            self.assertIn("corrupt", value["reason"])
+
     def test_no_opt_in_without_pointer_waits_for_controller(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             status = Path(directory) / "status.json"
