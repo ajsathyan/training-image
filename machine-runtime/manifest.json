@@ -1,5 +1,5 @@
 {
-  "artifactFingerprint": "c07d7f025570eef8230bb3910c237075c4b3a49225d1eb623f174626202a69b0",
+  "artifactFingerprint": "5714090adf0cfd616c4f7b68d2f04ca86f2df23ce6135890c5f2a159bbdcc03a",
   "files": [
     {
       "kind": "generated_package_marker",
@@ -144,9 +144,9 @@
   "schemaVersion": "agora.machine-runtime-export.v1",
   "source": {
     "artifactFingerprint": "e1e29d32c4e1a2f72cb3301b5a6f04a53ce582878e0205cb7fc92fa09d0647fe",
-    "commit": "230cd5c27f0bf73aad039aad5cc9a0af04098c8b",
+    "commit": "5c2000b4bb107a6102d72e9664c8bf65c9bdc18f",
     "manifestPath": "runtime/machine-runtime-source.v1.json",
     "manifestSha256": "f596c1060ce422f8f148ae3009735622e1078813d2fffd3c46610ac673cf56b3",
-    "tree": "9dec87fba729e04b18d7e9d820431b5cfb060cde"
+    "tree": "ad7385d3ca1462604eac214a0af8cc30cfdda204"
   }
 }
