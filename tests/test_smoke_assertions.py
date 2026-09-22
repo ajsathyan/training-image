@@ -29,6 +29,11 @@ class SmokeAssertionControlTests(unittest.TestCase):
         self.assertIn('docker cp "$work/configured-newer-fence.json"', configured_fixture)
         self.assertIn('docker cp "$work/configured-rollback-config.json"', configured_fixture)
         self.assertIn('docker cp "$work/configured-stage-config.json"', configured_fixture)
+        self.assertIn(
+            'config_hash="$(docker exec "$configured" sha256sum '
+            '/workspace/agora-run/controller-input/machine-config.json',
+            configured_fixture,
+        )
 
 
 if __name__ == "__main__":

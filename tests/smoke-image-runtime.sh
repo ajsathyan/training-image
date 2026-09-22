@@ -204,7 +204,6 @@ python3 "$REPO_ROOT/tests/generate_machine_image_config.py" config \
   --sentinel "$work/configured-sentinel.json" \
   --transition-kind stage \
   --allow-absent
-config_hash="$(sha256sum "$state/controller-input/machine-config.json" | awk '{print $1}')"
 printf '%s\n' 'permitted-inspection-marker' > "$state/progress.log"
 active_root_state="$work/active-root-state"
 mkdir -p "$active_root_state"
@@ -531,6 +530,7 @@ test "$repaired_source_commit" != "71a44b894100baa8f2996b97e73ae0bd67fa6b9d"
 
 capability_hash="$(docker exec "$configured" sha256sum /opt/agora-image-runtime/capability.json | awk '{print $1}')"
 runtime_fingerprint="$(docker exec "$configured" jq -r .runtimeExport.artifactFingerprint /opt/agora-image-runtime/capability.json)"
+config_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/controller-input/machine-config.json | awk '{print $1}')"
 docker exec "$configured" jq -e \
   --arg config "$config_hash" \
   --arg capability "$capability_hash" \
