@@ -150,16 +150,26 @@ assignment_current_owned_identity() {
 '''
 
 
-def owned_process_probe_command(root: Path, pane_pid: int) -> list[str]:
+def owned_process_probe_command(
+    root: Path,
+    pane_pid: int,
+    *,
+    training_source_root: str | Path | None = None,
+) -> list[str]:
     """Build a read-only exact-root descendant probe for one tmux pane."""
 
     if pane_pid < 1:
         raise ValueError("tmux pane PID must be positive")
+    discovery = assignment_owned_process_discovery_shell(
+        training_source_root=(
+            None if training_source_root is None else str(training_source_root)
+        )
+    )
     script = f"""
 set -euo pipefail
 ROOT={shlex.quote(str(root))}
 assignment_fail() {{ return 1; }}
-{assignment_owned_process_discovery_shell()}
+{discovery}
 pane_pid={pane_pid}
 assignment_descends_from_pane() {{
   local pid="$1" stat rest parent depth=0

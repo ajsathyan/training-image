@@ -40,6 +40,20 @@ def launch(token: str = "fixture-token") -> str:
 
 
 class BootStartTests(unittest.TestCase):
+    def test_entrypoint_keeps_pid1_lock_but_closes_it_for_bootstrap_child(self) -> None:
+        entrypoint = (ROOT / "start.sh").read_text(encoding="utf-8")
+        self.assertIn("exec 9>/run/agora-image-start.lock", entrypoint)
+        self.assertIn("if ! flock -n 9; then", entrypoint)
+        self.assertRegex(
+            entrypoint,
+            r"trap - ERR\nset \+e\nenv \\\n"
+            r"(?:.*\\\n)+?"
+            r"\s+/opt/agora-venv/bin/python /opt/agora-image-runtime/agora_boot_start\.py \\\n"
+            r"\s+9>&- \\\n\s+>/var/log/agora-image-bootstrap\.log 2>&1\n"
+            r"bootstrap_rc=\$\?\nset -e\ntrap start_failure ERR",
+        )
+        self.assertIn("exec sleep infinity", entrypoint)
+
     def test_active_root_pointer_is_private_idempotent_and_generation_fenced(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

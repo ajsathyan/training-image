@@ -140,6 +140,58 @@ class ImageBootstrapContractTests(unittest.TestCase):
         )
         self.assertEqual({key: identity[key] for key in expected}, expected)
 
+    def test_local_sentinel_verifies_canonical_rendered_machine_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "agora-run"
+            root.mkdir(mode=0o700)
+            normalized, _ = bootstrap._validated(valid_config(root), "token")
+            machine = bootstrap._sentinel_machine(normalized)
+            rendered_identity = remote_assets.machine_sentinel_identity(
+                machine,
+                {
+                    "fleetId": "fleet-a",
+                    "authorityEpoch": 5,
+                    "includeProviderBindingIdentity": True,
+                    "setupRevision": "fixture-setup-revision",
+                },
+                FleetError=bootstrap.BootstrapError,
+            )
+            rendered_identity.update(
+                authorityEpoch=5,
+                bootId="fixture-boot-id",
+                setupRevision="fixture-setup-revision",
+            )
+            state_dir = root / "machine-sentinel"
+            state_dir.mkdir(mode=0o700)
+            state_path = state_dir / "state.json"
+            state_path.write_text(
+                json.dumps({"identity": rendered_identity}), encoding="utf-8"
+            )
+            state_path.chmod(0o600)
+            sentinel_assets = mock.Mock()
+            sentinel_assets.machine_sentinel_identity = (
+                remote_assets.machine_sentinel_identity
+            )
+            sentinel_assets.remote_machine_sentinel_install_body.return_value = ":"
+
+            with mock.patch.object(
+                bootstrap.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ):
+                result = bootstrap._sentinel(root, normalized, sentinel_assets)
+
+        self.assertEqual(result["status"], "started")
+        self.assertEqual(result["machineId"], "machine-a")
+        self.assertNotIn("machineId", machine)
+        self.assertEqual(machine["id"], "machine-a")
+        self.assertEqual(
+            sentinel_assets.remote_machine_sentinel_install_body.call_args.kwargs[
+                "training_source_root"
+            ],
+            "/opt/agora-source",
+        )
+
     def test_missing_sentinel_lifecycle_identity_is_optional_service_failure(
         self,
     ) -> None:

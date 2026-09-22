@@ -860,6 +860,7 @@ def _sentinel(
     identity_fn = functools.partial(
         remote_assets.machine_sentinel_identity, FleetError=BootstrapError
     )
+    rendered_identity = identity_fn(machine, settings)
     body = remote_assets.remote_machine_sentinel_install_body(
         machine,
         settings,
@@ -873,6 +874,7 @@ def _sentinel(
         sh_single=shlex.quote,
         record_progress=True,
         manage_session=False,
+        training_source_root=str(TRAINING_SOURCE),
     )
     subprocess.run(
         ["bash"], input="set -Eeuo pipefail\n" + body, text=True, check=True, timeout=60
@@ -908,7 +910,7 @@ def _sentinel(
         "fleetId": sentinel_fleet_id,
         "authorityEpoch": sentinel_authority_epoch,
         **{
-            key: machine[key]
+            key: rendered_identity[key]
             for key in (
                 "launchId",
                 "reservationId",

@@ -305,6 +305,7 @@ def remote_machine_sentinel_install_body(
     asset_remote_root: str | None = None,
     write_credentials: bool = True,
     manage_session: bool = True,
+    training_source_root: str | None = None,
 ) -> str:
     remote_root = validated_machine_sentinel_remote_root(
         machine,
@@ -343,6 +344,21 @@ def remote_machine_sentinel_install_body(
     assignment_guard = render_assignment_start_guard(
         machine, sh_single=sh_single
     )
+    training_source_argument = ""
+    if training_source_root is not None:
+        normalized_training_source = posixpath.normpath(str(training_source_root))
+        if (
+            not normalized_training_source.startswith("/")
+            or normalized_training_source != str(training_source_root)
+        ):
+            raise FleetError(
+                "Machine Sentinel training source root must be normalized and absolute"
+            )
+        training_source_argument = (
+            "  --training-source-root "
+            + sh_single(normalized_training_source)
+            + " \\\n"
+        )
     package_sources = {
         path.name: path.read_text(encoding="utf-8")
         for path in sorted(MACHINE_SENTINEL_PACKAGE_DIR.glob("*.py"))
@@ -527,7 +543,7 @@ exec "$PYTHON_BIN" -u "$SENTINEL_DIR/agora_machine_sentinel_agent.py" \
   --credential-env-file "$SENTINEL_DIR/credential.env" \
   --state-file "$SENTINEL_DIR/state.json" \
   --root "$ROOT" \
-  --setup-revision {sh_single(str(settings["setupRevision"]))} \
+{training_source_argument}  --setup-revision {sh_single(str(settings["setupRevision"]))} \
   --provisioning-origin {sh_single(provisioning_origin)} \
   --authority-epoch {int(settings["authorityEpoch"])} \
   --timeout {float(settings["timeoutSeconds"])} \

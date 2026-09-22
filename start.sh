@@ -82,6 +82,7 @@ if ! flock -n 9; then
 fi
 
 rm -f /run/agora-image-bootstrap.status /run/agora-image-bootstrap.status.json
+trap - ERR
 set +e
 env \
     AGORA_BOOT_AUTOSTART="$boot_autostart" \
@@ -89,9 +90,11 @@ env \
     AGORA_BOOT_HF_TOKEN="$boot_hf_token" \
     AGORA_BOOT_METADATA_WAIT_SECONDS="$boot_metadata_wait_seconds" \
     /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_boot_start.py \
+    9>&- \
     >/var/log/agora-image-bootstrap.log 2>&1
 bootstrap_rc=$?
 set -e
+trap start_failure ERR
 printf '%s\n' "$bootstrap_rc" > /run/agora-image-bootstrap.status
 log_start_stage bootstrap_complete "$bootstrap_rc"
 

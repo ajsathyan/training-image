@@ -333,7 +333,7 @@ assignment_fail() {{ printf 'assignment-fence: %s\\n' "$1" >&2; exit 76; }}
 assignment_guard_acquire() {{
   [ "$ASSIGNMENT_LOCK_HELD" = 0 ] || return 0
   local attempt=0
-  while ! mkdir "$ASSIGNMENT_LOCK" 2>/dev/null; do
+  while ! (umask 077; mkdir "$ASSIGNMENT_LOCK") 2>/dev/null; do
     local owner=""
     owner="$(cat "$ASSIGNMENT_LOCK/pid" 2>/dev/null || true)"
     case "$owner" in
@@ -350,7 +350,7 @@ assignment_guard_acquire() {{
     [ "$attempt" -lt 120 ] || assignment_fail "timed out acquiring assignment lock"
     sleep 0.25
   done
-  printf '%s\\n' "$$" > "$ASSIGNMENT_LOCK/pid"
+  (umask 077; printf '%s\\n' "$$" > "$ASSIGNMENT_LOCK/pid")
   ASSIGNMENT_LOCK_HELD=1
 }}
 assignment_guard_ready() {{
@@ -385,7 +385,7 @@ assignment_fail() {{
 assignment_guard_acquire() {{
   [ "$ASSIGNMENT_LOCK_HELD" = 0 ] || return 0
   local attempt=0
-  while ! mkdir "$ASSIGNMENT_LOCK" 2>/dev/null; do
+  while ! (umask 077; mkdir "$ASSIGNMENT_LOCK") 2>/dev/null; do
     local owner=""
     owner="$(cat "$ASSIGNMENT_LOCK/pid" 2>/dev/null || true)"
     case "$owner" in
@@ -402,7 +402,7 @@ assignment_guard_acquire() {{
     [ "$attempt" -lt 120 ] || assignment_fail "timed out acquiring assignment lock"
     sleep 0.25
   done
-  printf '%s\\n' "$$" > "$ASSIGNMENT_LOCK/pid"
+  (umask 077; printf '%s\\n' "$$" > "$ASSIGNMENT_LOCK/pid")
   ASSIGNMENT_LOCK_HELD=1
 }}
 assignment_guard_release() {{
