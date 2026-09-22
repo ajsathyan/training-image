@@ -23,6 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from assignment_transition import (  # noqa: E402
     AssignmentTransitionError,
     assignment_transition,
+    ensure_private_directory,
+    preflight_private_root,
     private_atomic_write,
     saved_assignment_observation,
     verify_assignment_postcondition,
@@ -100,8 +102,15 @@ def _config(path: Path) -> tuple[dict[str, Any] | None, str]:
     if not path.exists():
         return None, ""
     try:
-        if stat.S_IMODE(path.stat().st_mode) != 0o600:
-            raise BootstrapError("machine configuration must be mode 0600")
+        metadata = path.lstat()
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise BootstrapError(
+                "machine configuration must be a regular non-symlink 0600 file"
+            )
         content = path.read_bytes()
         value = json.loads(content)
     except (OSError, json.JSONDecodeError) as exc:
@@ -145,9 +154,15 @@ def _remote_root(config: dict[str, Any]) -> Path:
 
 def _secret_file(path: Path, label: str) -> str:
     try:
-        mode = stat.S_IMODE(path.stat().st_mode)
-        if mode != 0o600:
-            raise BootstrapError(f"{label} file must be mode 0600")
+        metadata = path.lstat()
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise BootstrapError(
+                f"{label} file must be a regular non-symlink 0600 file"
+            )
         return path.read_text(encoding="utf-8").strip()
     except OSError as exc:
         raise BootstrapError(f"{label} file is unavailable") from exc
@@ -289,10 +304,10 @@ def _validated(config: dict[str, Any], token: str) -> tuple[dict[str, Any], Path
 
 
 def _private_write(path: Path, text: str, mode: int = 0o600) -> None:
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.next")
-    temporary.write_text(text, encoding="utf-8")
-    temporary.chmod(mode)
-    temporary.replace(path)
+    try:
+        private_atomic_write(path, text.encode("utf-8"), mode=mode)
+    except AssignmentTransitionError as exc:
+        raise BootstrapError(str(exc)) from exc
 
 
 def _check_existing_identity(
@@ -673,14 +688,13 @@ def _heartbeat(root: Path, config: dict[str, Any], assets: Any) -> dict[str, obj
 def _materialize_state(
     root: Path, config: dict[str, Any], token: str, commit: str
 ) -> None:
-    root.mkdir(parents=True, exist_ok=True)
-    root.chmod(0o700)
+    ensure_private_directory(root, label="private runtime root")
     logs = root / "logs"
-    logs.mkdir(exist_ok=True)
-    logs.chmod(0o700)
+    ensure_private_directory(logs, label="private runtime logs")
     cache = root.parent / "pluralis-agora-cache"
     for path in (cache / "hf", cache / "pip", cache / "tmp", root / "tmp"):
         path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o700)
     announce = config.get("announcePort") or ""
     environment = {
         "HF_TOKEN": token,
@@ -750,7 +764,9 @@ def _durable_sentinel_token(root: Path) -> str:
     return ""
 
 
-def _sentinel(root: Path, config: dict[str, Any], remote_assets: Any) -> None:
+def _sentinel(
+    root: Path, config: dict[str, Any], remote_assets: Any
+) -> dict[str, str]:
     sentinel = config["sentinel"]
     mode = str(sentinel.get("mode") or "local").strip().lower()
     url = str(sentinel.get("url") or "").strip()
@@ -768,10 +784,29 @@ def _sentinel(root: Path, config: dict[str, Any], remote_assets: Any) -> None:
     )
     if mode not in {"local", "remote"}:
         raise BootstrapError("sentinel mode must be local or remote")
+    required_identity = (
+        "launchId",
+        "reservationId",
+        "slotId",
+        "slotGeneration",
+        "machineGenerationId",
+    )
+    if mode == "local" and any(config.get(name) in {None, ""} for name in required_identity):
+        return {
+            "status": "deferred_until_registered",
+            "detail": "canonical lifecycle identity is not materialized",
+        }
+    if mode == "local" and config.get("authorityEpoch") in {None, 0, ""}:
+        return {
+            "status": "deferred_until_local_authority",
+            "detail": "canonical local machine-command authority is unavailable",
+        }
     if mode == "remote" and (
         not url.startswith("https://") or not (bootstrap or machine_token)
     ):
         raise BootstrapError("sentinel remote configuration is incomplete")
+    if mode == "local" and (url or bootstrap or machine_token):
+        raise BootstrapError("sentinel local mode must not contain cloud credentials")
     sentinel_fleet_id = sentinel.get("fleetId")
     sentinel_authority_epoch = sentinel.get("authorityEpoch")
     machine_fleet_id = config.get("fleetId")
@@ -845,7 +880,7 @@ def _sentinel(root: Path, config: dict[str, Any], remote_assets: Any) -> None:
         ["tmux", "has-session", "-t", "agora_sentinel"], check=False
     )
     if session.returncode == 0:
-        return
+        return {"status": "started"}
     command = ["tmux", "new-session", "-d", "-s", "agora_sentinel"]
     if bootstrap:
         command.extend(["-e", f"AGORA_SENTINEL_BOOTSTRAP_TOKEN={bootstrap}"])
@@ -866,6 +901,7 @@ def _sentinel(root: Path, config: dict[str, Any], remote_assets: Any) -> None:
     for path in (bootstrap_path, machine_path):
         if path is not None:
             path.unlink(missing_ok=True)
+    return {"status": "started"}
 
 
 def _inspection_root(capability: dict[str, Any]) -> Path:
@@ -1082,6 +1118,64 @@ def _write_receipt(path: Path, payload: dict[str, Any]) -> None:
     _private_write(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+def _stop_exact_owned_training(root: Path, config: dict[str, Any]) -> bool:
+    """Stop only the supervisor still bound to the failing assignment generation."""
+
+    machine_path = root / "machine.json"
+    try:
+        machine = json.loads(machine_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(machine, dict) or any(
+        machine.get(key) != config.get(key)
+        for key in ("assignmentOperationId", "assignmentGeneration")
+    ):
+        return False
+    tmux = shutil.which("tmux")
+    if not tmux:
+        return False
+    present = subprocess.run(
+        [tmux, "has-session", "-t", "agora_gpu"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+    if not present:
+        return True
+    subprocess.run(
+        [tmux, "kill-session", "-t", "agora_gpu"],
+        check=True,
+        timeout=15,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return True
+
+
+def _record_incomplete_boot(
+    root: Path, config: dict[str, Any], *, detail: str, training_stopped: bool
+) -> None:
+    _private_write(
+        root / "boot-incomplete.json",
+        json.dumps(
+            {
+                "schemaVersion": "agora.machine-image-boot-incomplete.v1",
+                "status": "boot_incomplete_recoverable",
+                "assignmentOperationId": config.get("assignmentOperationId"),
+                "assignmentGeneration": config.get("assignmentGeneration"),
+                "trainingStopped": training_stopped,
+                "detail": detail[:500],
+                "recordedAt": dt.datetime.now(dt.timezone.utc)
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+
+
 def _record_optional(root: Path, name: str, operation: Any) -> dict[str, str]:
     try:
         result = operation()
@@ -1188,6 +1282,8 @@ def main() -> int:
     expected_receipt = (root / "bootstrap-receipt.json").resolve()
     if receipt_path != expected_receipt:
         raise BootstrapError("receipt path must be the canonical file under remoteRoot")
+    normalized: dict[str, Any] | None = None
+    training_started = False
     try:
         capability, capability_hash = _capability()
         _verify_declared_capability(config, capability)
@@ -1209,6 +1305,7 @@ def main() -> int:
                 raise BootstrapError(
                     "HF token file must be under controller-input"
                 ) from exc
+        preflight_private_root(root)
         token = _secret_file(token_path, "HF token")
         normalized, root = _validated(config, token)
         assets, remote_assets = _load_runtime_modules()
@@ -1287,6 +1384,19 @@ def main() -> int:
             ):
                 _write_training_intent(root, normalized)
             assignment_manifest = transition.commit()
+        _write_receipt(
+            receipt_path,
+            {
+                "status": "prepared",
+                "machineId": normalized["machineId"],
+                "provider": normalized["provider"],
+                "accountScope": normalized["accountScope"],
+                "providerResourceId": normalized["providerResourceId"],
+                "assignmentOperationId": normalized["assignmentOperationId"],
+                "assignmentGeneration": normalized["assignmentGeneration"],
+                "configSha256": config_hash,
+            },
+        )
         training = {
             "requested": normalized["startTraining"],
             "status": (
@@ -1310,6 +1420,7 @@ def main() -> int:
             ):
                 raise BootstrapError("training supervisor did not start")
             training["status"] = "started"
+            training_started = True
         if preserved_ready:
             heartbeat = {
                 "requested": normalized["heartbeat"]["mode"] == "configured",
@@ -1423,6 +1534,7 @@ def main() -> int:
                 "optional": optional,
             },
         )
+        (root / "boot-incomplete.json").unlink(missing_ok=True)
         print(
             f"agora image runtime: ready machine={normalized['machineId']} root={root} commit={commit}"
         )
@@ -1438,14 +1550,37 @@ def main() -> int:
             # Observation restoration is not assignment/training setup and
             # never owns the canonical bootstrap receipt, including failures.
             raise
-        _write_receipt(
-            receipt_path,
-            {
-                "status": "failed",
-                "configSha256": config_hash,
-                "detail": str(exc)[:500],
-            },
-        )
+        if training_started and normalized is not None:
+            stopped = False
+            try:
+                stopped = _stop_exact_owned_training(root, normalized)
+            except Exception:
+                stopped = False
+            try:
+                _record_incomplete_boot(
+                    root,
+                    normalized,
+                    detail=str(exc),
+                    training_stopped=stopped,
+                )
+            except Exception:
+                pass
+        try:
+            _write_receipt(
+                receipt_path,
+                {
+                    "status": (
+                        "boot_incomplete_recoverable"
+                        if training_started
+                        else "failed"
+                    ),
+                    "configSha256": config_hash,
+                    "detail": str(exc)[:500],
+                },
+            )
+        except Exception:
+            if not training_started:
+                raise
         raise
 
 

@@ -910,6 +910,7 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
                 json.dumps(launch, sort_keys=True, separators=(",", ":")).encode()
             ).decode()
             status = Path(directory) / "boot-status.json"
+            pointer = Path(directory) / "var" / "lib" / "agora" / "active-root.json"
 
             def invoke(config, observed_token, *, persist):
                 self.assertTrue(persist)
@@ -925,6 +926,7 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
 
             with (
                 mock.patch.object(boot_start, "STATUS", status),
+                mock.patch.object(boot_start, "ACTIVE_ROOT_POINTER", pointer),
                 mock.patch.object(boot_start, "_verify_boot_capability"),
                 mock.patch.object(
                     boot_start,
@@ -1203,7 +1205,13 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
                 (root / "bootstrap-receipt.json").read_text(encoding="utf-8")
             )
             self.assertEqual(persisted, newer)
-            self.assertEqual(failed_receipt["status"], "failed")
+            self.assertEqual(
+                failed_receipt["status"], "boot_incomplete_recoverable"
+            )
+            incomplete = json.loads(
+                (root / "boot-incomplete.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(incomplete["assignmentGeneration"], 5)
 
     def test_postcommit_start_failure_keeps_target_and_exact_retry_finishes(
         self,

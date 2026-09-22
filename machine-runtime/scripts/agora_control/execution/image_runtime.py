@@ -226,6 +226,95 @@ def boot_launch_summary(launch: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def render_registered_sentinel_start_script(
+    machine: Mapping[str, Any],
+    *,
+    fleet_id: str,
+    authority_epoch: int,
+    error: type[Exception] = ValueError,
+) -> str:
+    """Hydrate local Sentinel identity and start only the image-baked runtime."""
+
+    if not fleet_id or not isinstance(authority_epoch, int) or authority_epoch < 1:
+        raise error("registered Sentinel start requires canonical local authority")
+    lifecycle: dict[str, Any] = {
+        "fleetId": fleet_id,
+        "authorityEpoch": authority_epoch,
+    }
+    for name in (
+        "launchId",
+        "reservationId",
+        "slotId",
+        "machineGenerationId",
+    ):
+        lifecycle[name] = _text(machine, name, error=error)
+    lifecycle["slotGeneration"] = _positive_int(
+        machine, "slotGeneration", error=error
+    )
+    binding = {
+        "machineId": _text(machine, "id", "machineId", error=error),
+        "provider": _text(machine, "provider", error=error).lower(),
+        "accountScope": _text(
+            machine, "accountScope", "providerAccount", error=error
+        ).lower(),
+        "providerResourceId": _text(
+            machine,
+            "providerResourceId",
+            "runpodId",
+            "vastId",
+            "vastInstanceId",
+            error=error,
+        ),
+        "assignmentOperationId": _text(
+            machine, "assignmentOperationId", error=error
+        ),
+        "assignmentGeneration": _positive_int(
+            machine, "assignmentGeneration", error=error
+        ),
+    }
+    payload = base64.b64encode(
+        json.dumps(
+            {"binding": binding, "lifecycle": lifecycle},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).decode("ascii")
+    root = _remote_root(machine, error=error)
+    q = shlex.quote
+    return f"""#!/usr/bin/env bash
+set -Eeuo pipefail
+ROOT={q(root)}
+CONFIG="$ROOT/controller-input/machine-config.json"
+TOKEN="$ROOT/controller-input/hf-token"
+RECEIPT="$ROOT/bootstrap-receipt.json"
+test -x /opt/agora-venv/bin/python
+test -f /opt/agora-image-runtime/agora_image_bootstrap.py
+/opt/agora-venv/bin/python - "$CONFIG" {q(payload)} <<'PY'
+import base64,json,pathlib,stat,sys
+runtime = pathlib.Path('/opt/agora-image-runtime')
+sys.path.insert(0, str(runtime))
+from assignment_transition import private_atomic_write
+path = pathlib.Path(sys.argv[1])
+metadata = path.lstat()
+if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+    raise SystemExit('registered Sentinel config is not a regular 0600 file')
+config = json.loads(path.read_text(encoding='utf-8'))
+patch = json.loads(base64.b64decode(sys.argv[2], validate=True))
+binding = patch['binding']
+for key, expected in binding.items():
+    if config.get(key) != expected:
+        raise SystemExit(f'registered Sentinel binding mismatch: {{key}}')
+config.update(patch['lifecycle'])
+config['sentinel'] = {'mode': 'local', 'url': '', 'timeoutSeconds': 10.0}
+private_atomic_write(path, (json.dumps(config, sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8'))
+PY
+/opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
+  --config "$CONFIG" --token-file "$TOKEN" --receipt "$RECEIPT" --observation-resume
+printf '__AGORA_SENTINEL_LOCAL_READY__ machine=%s generation=%s\n' \
+  {q(binding['machineId'])} {q(str(binding['assignmentGeneration']))}
+"""
+
+
 def configured_image_capability(
     contract: Any,
     fingerprint: Any,

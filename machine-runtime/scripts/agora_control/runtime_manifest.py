@@ -22,6 +22,7 @@ def canonical_machine_runtime_manifest(root: Path) -> dict[str, Any]:
     paths = [
         root / "scripts" / "agora_heartbeat_agent.py",
         root / "scripts" / "agora_machine_sentinel_agent.py",
+        root / "scripts" / "agora_machine_sentinel_spool.py",
         root / "scripts" / "agora_control" / "execution" / "assets.py",
         root / "scripts" / "agora_control" / "execution" / "image_runtime.py",
         root / "scripts" / "agora_control" / "monitoring" / "remote_assets.py",
@@ -41,6 +42,7 @@ def canonical_machine_runtime_manifest(root: Path) -> dict[str, Any]:
         "sources": sources,
         "entrypoints": {
             "collector": "scripts/agora_machine_sentinel_agent.py",
+            "spoolExporter": "scripts/agora_machine_sentinel_spool.py",
             "heartbeatAgent": "scripts/agora_heartbeat_agent.py",
             "setupRenderer": "scripts/agora_control/execution/assets.py",
             "assignmentConfigRenderer": (

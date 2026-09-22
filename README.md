@@ -9,13 +9,18 @@ The publication target is `ghcr.io/ajsathyan/training-image`. Pull requests
 build and run fresh-container tests without pushing. Merges to `main` publish
 `latest` and `sha-<commit>` through `.github/workflows/publish-image.yml`.
 
+The published baseline before this candidate is
+`sha256:d78059aa60a205f99c73f1d875dab447957320382d858163f3103a4f3a6c2f2c`;
+its immediate rollback is
+`sha256:3cd92abfaf1e77800b66c748ac655cb2be7a91b90311e1d412ac90bd272dfd07`.
+
 ## Pinned inputs
 
 - upstream image: `ghcr.io/pluralisresearch/agora-test@sha256:da54b2e3e37b90f9f62d9a04546a95e3bd4711fb4641bd61c13e3db8561a1326`
 - Agora training source: `PluralisResearch/agora-test@71a44b894100baa8f2996b97e73ae0bd67fa6b9d`
-- fleet runtime: `ajsathyan/agora-runpod@3df74741f9f3faf3eebe036e6c0750887d905e71`
-- fleet source tree: `e1f2e90e79af7ae5a16bd5c84acaf7eac31ffca2`
-- runtime export: `f2f7be23a054bc2a8916bf59eaf1e495a86132c668953e2c2ae16166b2807062`
+- fleet runtime: `ajsathyan/agora-runpod@230cd5c27f0bf73aad039aad5cc9a0af04098c8b`
+- fleet source tree: `9dec87fba729e04b18d7e9d820431b5cfb060cde`
+- runtime export: `c07d7f025570eef8230bb3910c237075c4b3a49225d1eb623f174626202a69b0`
 - px0: `v0.1.6`, verified by the SHA-256 in `Dockerfile`
 - in-place repair build tooling: exact wheel hashes in
   `image-repair-build-requirements.txt`
@@ -34,7 +39,7 @@ smoked before promotion; the cache never authorizes publication and pull-request
 builds remain local.
 
 The currently published image has a registry gzip layer sum of
-7,956,427,443 bytes and a Docker logical image size of 13,958,845,425 bytes.
+7,956,427,279 bytes and release-smoke logical image size of 13,958,845,976 bytes.
 Neither value is the build's total transient disk peak, which is unknown. The
 workflow's prepared and post-build disk checkpoints are phase-boundary samples;
 they provide only lower bounds on maximum disk use between those checkpoints.
@@ -80,6 +85,17 @@ identity. Historical launch, reservation, slot, fleet, migration, and remote
 authority metadata are not invented or required for local SSH and training.
 A provider machine may accept a newer controller-authorized assignment
 generation; stale or conflicting generations fail closed.
+
+The runtime root must support exact private POSIX modes. Bootstrap preflights and
+repairs root directories to `0700` and secret/config files to `0600`, rejecting
+symlinks, non-regular files, and mounts such as VFAT that cannot enforce those
+modes before it persists a secret or starts training. The canonical active-root
+pointer binds machine and assignment generation; manual restart without an active
+pointer waits for controller configuration instead of guessing a default root.
+
+A strict `prepared` receipt is durable before training starts. If a later required
+step fails, bootstrap stops only its exact owned `agora_gpu` session and records
+`boot_incomplete_recoverable`; it does not leave unacknowledged training running.
 
 SSH starts before bootstrap. Missing machine config leaves SSH ready with
 training disabled. Sentinel reporting, inspection, and px0 are optional and
@@ -159,7 +175,7 @@ Use a fleet clone containing the reviewed exact commit:
 ```bash
 python3 tools/export_fleet_runtime.py \
   --source-repo /absolute/path/to/agora-runpod \
-  --source-commit 3df74741f9f3faf3eebe036e6c0750887d905e71 \
+  --source-commit 230cd5c27f0bf73aad039aad5cc9a0af04098c8b \
   --output-dir machine-runtime
 python3 -m unittest tests.test_runtime_export -v
 ```

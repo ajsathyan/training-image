@@ -370,6 +370,9 @@ def initial_runtime_state(
         authority_epoch=authority_epoch,
     )
     for field in (
+        "fleetId",
+        "launchId",
+        "slotId",
         "machineGenerationId",
         "provider",
         "accountScope",
@@ -405,6 +408,9 @@ def reconcile_runtime_identity(
                 )
         identity_hydrated = False
         for field in (
+            "fleetId",
+            "launchId",
+            "slotId",
             "machineGenerationId",
             "provider",
             "accountScope",

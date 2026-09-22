@@ -4,17 +4,27 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import math
 import os
 import re
+import stat
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from assignment_transition import (  # noqa: E402
+    AssignmentTransitionError,
+    ensure_private_directory,
+    private_atomic_write,
+)
 
 SCHEMA = "agora.machine-boot-launch.v1"
 BOOTSTRAP = Path("/opt/agora-image-runtime/agora_image_bootstrap.py")
@@ -23,6 +33,9 @@ DEFAULT_ROOT = Path("/workspace/agora-run")
 STAGING_ROOT = Path(os.environ.get("AGORA_BOOT_STAGING_ROOT", "/run"))
 STATUS = Path("/run/agora-image-bootstrap.status.json")
 CAPABILITY = Path("/opt/agora-image-runtime/capability.json")
+ACTIVE_ROOT_POINTER = Path(
+    os.environ.get("AGORA_ACTIVE_ROOT_POINTER", "/var/lib/agora/active-root.json")
+)
 PROVIDER_ENV_FILES = (Path("/root/.env_vars/env_vars.txt"), Path("/etc/rp_environment"))
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}$")
 PORT = re.compile(r"^[1-9][0-9]{0,4}$")
@@ -53,13 +66,31 @@ def _verify_boot_capability() -> None:
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.next")
-    with temporary.open("w", encoding="utf-8") as stream:
-        json.dump(dict(value), stream, sort_keys=True, separators=(",", ":"))
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    temporary.chmod(0o600)
-    temporary.replace(path)
+    if temporary.exists() or temporary.is_symlink():
+        raise BootInputError("status temporary path is unsafe")
+    descriptor = os.open(
+        temporary,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as stream:
+            descriptor = -1
+            json.dump(dict(value), stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600, follow_symlinks=False)
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise BootInputError("status path cannot enforce mode 0600")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary.exists() and not temporary.is_symlink():
+            with contextlib.suppress(OSError):
+                temporary.unlink()
 
 
 def _status(state: str, reason: str, **fields: Any) -> None:
@@ -83,6 +114,115 @@ def _decode_launch(environment: Mapping[str, str]) -> dict[str, Any]:
     if config.get("schemaVersion") != "agora.machine-image-config.v1":
         raise BootInputError("launch envelope config has unsupported schemaVersion")
     return value
+
+
+def _normalized_remote_root(raw: Any) -> Path:
+    text = str(raw or "").strip()
+    path = Path(text)
+    if (
+        not path.is_absolute()
+        or path == Path("/")
+        or text in {"/workspace", "/root", "/opt"}
+        or ".." in path.parts
+        or len(path.parts) < 3
+    ):
+        raise BootInputError(
+            "remoteRoot must be a safe absolute path at least two components deep"
+        )
+    return path
+
+
+def _root_identity(config: Mapping[str, Any]) -> dict[str, Any]:
+    generation = config.get("assignmentGeneration")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        raise BootInputError("launch assignment generation is invalid")
+    identity = {
+        "machineId": str(config.get("machineId") or ""),
+        "provider": str(config.get("provider") or ""),
+        "accountScope": str(config.get("accountScope") or ""),
+        "providerResourceId": str(config.get("providerResourceId") or ""),
+        "assignmentOperationId": str(config.get("assignmentOperationId") or ""),
+        "assignmentGeneration": generation,
+    }
+    if any(not value for key, value in identity.items() if key != "assignmentGeneration"):
+        raise BootInputError("launch root identity is incomplete")
+    return identity
+
+
+def _root_identity_digest(config: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        _root_identity(config), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _read_active_root_pointer() -> dict[str, Any] | None:
+    path = ACTIVE_ROOT_POINTER
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        metadata = path.lstat()
+        parent = path.parent.lstat()
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or stat.S_ISLNK(parent.st_mode)
+            or not stat.S_ISDIR(parent.st_mode)
+            or stat.S_IMODE(parent.st_mode) != 0o700
+        ):
+            raise BootInputError("active root pointer has unsafe type or mode")
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BootInputError("active root pointer is unavailable or corrupt") from exc
+    if (
+        not isinstance(value, dict)
+        or value.get("schemaVersion") != "agora.active-runtime-root.v1"
+        or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("identitySha256") or ""))
+        or not isinstance(value.get("assignmentGeneration"), int)
+        or isinstance(value.get("assignmentGeneration"), bool)
+        or value["assignmentGeneration"] < 1
+    ):
+        raise BootInputError("active root pointer is invalid")
+    value["remoteRoot"] = str(_normalized_remote_root(value.get("remoteRoot")))
+    return value
+
+
+def _record_active_root(config: Mapping[str, Any]) -> None:
+    root = _normalized_remote_root(config.get("remoteRoot"))
+    identity = _root_identity(config)
+    wanted = {
+        "schemaVersion": "agora.active-runtime-root.v1",
+        "remoteRoot": str(root),
+        "assignmentGeneration": identity["assignmentGeneration"],
+        "assignmentOperationId": identity["assignmentOperationId"],
+        "identitySha256": _root_identity_digest(config),
+    }
+    current = _read_active_root_pointer()
+    if current is not None:
+        current_generation = int(current["assignmentGeneration"])
+        wanted_generation = int(wanted["assignmentGeneration"])
+        if wanted_generation < current_generation:
+            raise BootInputError("launch root pointer is older than saved assignment")
+        if wanted_generation == current_generation and any(
+            current.get(key) != wanted.get(key)
+            for key in ("remoteRoot", "assignmentOperationId", "identitySha256")
+        ):
+            raise BootInputError("launch root pointer conflicts with saved assignment")
+    try:
+        if not ACTIVE_ROOT_POINTER.parent.exists():
+            ACTIVE_ROOT_POINTER.parent.mkdir(parents=True, mode=0o700)
+        ensure_private_directory(
+            ACTIVE_ROOT_POINTER.parent, label="active root pointer directory"
+        )
+        private_atomic_write(
+            ACTIVE_ROOT_POINTER,
+            (json.dumps(wanted, sort_keys=True, separators=(",", ":")) + "\n").encode(
+                "utf-8"
+            ),
+        )
+    except AssignmentTransitionError as exc:
+        raise BootInputError(str(exc)) from exc
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -223,7 +363,7 @@ def _saved_selection(root: Path, launch: Mapping[str, Any]) -> str:
 
 
 def _run_bootstrap(config: dict[str, Any], token: str, *, persist: bool) -> int:
-    root = Path(str(config.get("remoteRoot") or DEFAULT_ROOT))
+    root = _normalized_remote_root(config.get("remoteRoot"))
     root.mkdir(parents=True, exist_ok=True)
     receipt = root / "bootstrap-receipt.json"
     with tempfile.TemporaryDirectory(
@@ -232,13 +372,16 @@ def _run_bootstrap(config: dict[str, Any], token: str, *, persist: bool) -> int:
         stage = Path(directory)
         config_path = stage / "machine-config.json"
         token_path = stage / "hf-token"
-        config_path.write_text(
-            json.dumps(config, sort_keys=True, separators=(",", ":")) + "\n",
-            encoding="utf-8",
+        _atomic_json(config_path, config)
+        descriptor = os.open(
+            token_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
         )
-        token_path.write_text(token + "\n", encoding="utf-8")
-        config_path.chmod(0o600)
-        token_path.chmod(0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as stream:
+            stream.write(token + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         command = [
             str(PYTHON),
             str(BOOTSTRAP),
@@ -303,6 +446,7 @@ def _saved_boot(root: Path, environment: Mapping[str, str]) -> int:
         wait_seconds=_metadata_wait_seconds(environment),
     )
     _apply_provider_metadata(config, resource, port, refresh_port=True)
+    _record_active_root(config)
     return _run_bootstrap(config, token, persist=True)
 
 
@@ -338,7 +482,22 @@ def _metadata_wait_seconds(environment: Mapping[str, str]) -> float:
 def main(environment: Mapping[str, str] | None = None) -> int:
     environment = os.environ if environment is None else environment
     if str(environment.get("AGORA_BOOT_AUTOSTART") or "") != "1":
-        canonical = DEFAULT_ROOT / "controller-input"
+        try:
+            pointer = _read_active_root_pointer()
+        except BootInputError as exc:
+            _status("waiting_for_controller_config", str(exc)[:500])
+            return 0
+        if pointer is None:
+            _status(
+                "waiting_for_controller_config",
+                "no active runtime root is configured",
+            )
+            print(
+                "agora image runtime: no active runtime root; training and inspection remain disabled"
+            )
+            return 0
+        saved_root = _normalized_remote_root(pointer["remoteRoot"])
+        canonical = saved_root / "controller-input"
         if (canonical / "machine-config.json").is_file():
             try:
                 saved_config = json.loads(
@@ -349,12 +508,12 @@ def main(environment: Mapping[str, str] | None = None) -> int:
                     raise BootInputError("saved controller input is corrupt")
                 if (
                     _saved_selection(
-                        DEFAULT_ROOT,
+                        saved_root,
                         {"config": {"assignmentGeneration": saved_generation}},
                     )
                     == "stopped"
                 ):
-                    rc = _restore_saved_observation(DEFAULT_ROOT)
+                    rc = _restore_saved_observation(saved_root)
                     _status(
                         "stopped" if rc == 0 else "observation_failed",
                         (
@@ -378,7 +537,7 @@ def main(environment: Mapping[str, str] | None = None) -> int:
                     "--token-file",
                     str(canonical / "hf-token"),
                     "--receipt",
-                    str(DEFAULT_ROOT / "bootstrap-receipt.json"),
+                    str(saved_root / "bootstrap-receipt.json"),
                     "--boot-resume",
                 ],
                 check=False,
@@ -391,9 +550,12 @@ def main(environment: Mapping[str, str] | None = None) -> int:
                 selection="saved",
             )
             return 0
-        _status("manual", "boot autostart is not enabled")
+        _status(
+            "waiting_for_controller_config",
+            "active runtime root has no saved controller input",
+        )
         print(
-            "agora image runtime: no machine configuration; training and inspection remain disabled"
+            "agora image runtime: active root has no machine configuration; training and inspection remain disabled"
         )
         return 0
     try:
@@ -406,7 +568,7 @@ def main(environment: Mapping[str, str] | None = None) -> int:
         if hashlib.sha256(token.encode()).hexdigest() != expected:
             raise BootInputError("machine-scoped HF token digest mismatch")
         config = dict(launch["config"])
-        root = Path(str(config.get("remoteRoot") or DEFAULT_ROOT))
+        root = _normalized_remote_root(config.get("remoteRoot"))
         selection = _saved_selection(root, launch)
         if selection == "stopped":
             rc = _restore_saved_observation(root)
@@ -428,6 +590,7 @@ def main(environment: Mapping[str, str] | None = None) -> int:
                 wait_seconds=_metadata_wait_seconds(environment),
             )
             _apply_provider_metadata(config, resource, port)
+            _record_active_root(config)
             rc = _run_bootstrap(config, token, persist=True)
         if rc != 0:
             raise BootInputError(f"canonical bootstrap exited with status {rc}")
