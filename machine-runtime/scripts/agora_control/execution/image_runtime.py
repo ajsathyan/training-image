@@ -319,7 +319,7 @@ config['sentinel'] = {{
     'fleetId': patch['lifecycle']['fleetId'],
     'authorityEpoch': patch['lifecycle']['authorityEpoch'],
 }}
-private_atomic_write(path, (json.dumps(config, sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8'))
+private_atomic_write(path, (json.dumps(config, sort_keys=True, separators=(',', ':')) + '\\n').encode('utf-8'))
 PY
 /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
   --config "$CONFIG" --token-file "$TOKEN" --receipt "$RECEIPT" --observation-resume
