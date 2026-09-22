@@ -197,10 +197,17 @@ def merge_vast_boot_launch(
         }
     )
     onstart = str(result.get("onstart") or "").rstrip()
+    preserved = ""
+    if onstart:
+        preserved = (
+            "AGORA_PRIOR_ONSTART_RC=0\n"
+            f"bash -c {shlex.quote(onstart)} || AGORA_PRIOR_ONSTART_RC=$?\n"
+            'if [ "$AGORA_PRIOR_ONSTART_RC" -ne 0 ]; then exit "$AGORA_PRIOR_ONSTART_RC"; fi\n'
+        )
     result["onstart"] = (
-        onstart
-        + ("; " if onstart else "")
-        + f"nohup {shlex.quote(starter_path)} >{shlex.quote(starter_log)} 2>&1 &"
+        preserved
+        + f"nohup {shlex.quote(starter_path)} >{shlex.quote(starter_log)} 2>&1 &\n"
+        + "true"
     )
     result["env"] = env
     return result
@@ -305,14 +312,98 @@ for key, expected in binding.items():
     if config.get(key) != expected:
         raise SystemExit(f'registered Sentinel binding mismatch: {{key}}')
 config.update(patch['lifecycle'])
-config['sentinel'] = {'mode': 'local', 'url': '', 'timeoutSeconds': 10.0}
+config['sentinel'] = {{
+    'mode': 'local',
+    'url': '',
+    'timeoutSeconds': 10.0,
+    'fleetId': patch['lifecycle']['fleetId'],
+    'authorityEpoch': patch['lifecycle']['authorityEpoch'],
+}}
 private_atomic_write(path, (json.dumps(config, sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8'))
 PY
 /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
   --config "$CONFIG" --token-file "$TOKEN" --receipt "$RECEIPT" --observation-resume
-printf '__AGORA_SENTINEL_LOCAL_READY__ machine=%s generation=%s\n' \
-  {q(binding['machineId'])} {q(str(binding['assignmentGeneration']))}
+/opt/agora-venv/bin/python - "$ROOT/machine-sentinel/state.json" {q(payload)} <<'PY'
+import base64,json,pathlib,stat,sys
+path = pathlib.Path(sys.argv[1])
+metadata = path.lstat()
+if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+    raise SystemExit('registered Sentinel state is not a regular 0600 file')
+state = json.loads(path.read_text(encoding='utf-8'))
+identity = state.get('identity') if isinstance(state, dict) else None
+if not isinstance(identity, dict):
+    raise SystemExit('registered Sentinel state has no identity proof')
+patch = json.loads(base64.b64decode(sys.argv[2], validate=True))
+expected = {{**patch['binding'], **patch['lifecycle']}}
+for key, value in expected.items():
+    if identity.get(key) != value:
+        raise SystemExit(f'registered Sentinel state mismatch: {{key}}')
+for key in ('bootId', 'setupRevision'):
+    if not isinstance(identity.get(key), str) or not identity[key].strip():
+        raise SystemExit(f'registered Sentinel state is missing {{key}}')
+proof = {{key: identity[key] for key in (*expected, 'bootId', 'setupRevision')}}
+encoded = base64.b64encode(json.dumps(proof, sort_keys=True, separators=(',', ':')).encode('utf-8')).decode('ascii')
+print('__AGORA_SENTINEL_LOCAL_READY__ proof=' + encoded)
+PY
 """
+
+
+def parse_registered_sentinel_ready(
+    output: Any,
+    machine: Mapping[str, Any],
+    *,
+    fleet_id: str,
+    authority_epoch: int,
+    error: type[Exception] = ValueError,
+) -> dict[str, Any]:
+    """Validate the authenticated identity proof emitted by image observation resume."""
+
+    matches = re.findall(
+        r"^__AGORA_SENTINEL_LOCAL_READY__ proof=([A-Za-z0-9+/=]+)$",
+        str(output or ""),
+        flags=re.MULTILINE,
+    )
+    if len(matches) != 1:
+        raise error("registered Sentinel returned no unique identity proof")
+    try:
+        proof = json.loads(base64.b64decode(matches[0], validate=True))
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise error("registered Sentinel returned invalid identity proof") from exc
+    if not isinstance(proof, dict):
+        raise error("registered Sentinel identity proof must be an object")
+    expected: dict[str, Any] = {
+        "fleetId": fleet_id,
+        "authorityEpoch": authority_epoch,
+        "machineId": _text(machine, "id", "machineId", error=error),
+        "provider": _text(machine, "provider", error=error).lower(),
+        "accountScope": _text(
+            machine, "accountScope", "providerAccount", error=error
+        ).lower(),
+        "providerResourceId": _text(
+            machine,
+            "providerResourceId",
+            "runpodId",
+            "vastId",
+            "vastInstanceId",
+            error=error,
+        ),
+        "assignmentOperationId": _text(
+            machine, "assignmentOperationId", error=error
+        ),
+        "assignmentGeneration": _positive_int(
+            machine, "assignmentGeneration", error=error
+        ),
+        "slotGeneration": _positive_int(machine, "slotGeneration", error=error),
+    }
+    for name in ("launchId", "reservationId", "slotId", "machineGenerationId"):
+        expected[name] = _text(machine, name, error=error)
+    for key, value in expected.items():
+        if proof.get(key) != value:
+            raise error(f"registered Sentinel identity proof mismatch: {key}")
+    for key in ("bootId", "setupRevision"):
+        if not isinstance(proof.get(key), str) or not proof[key].strip():
+            raise error(f"registered Sentinel identity proof is missing {key}")
+    return {key: proof[key] for key in (*expected, "bootId", "setupRevision")}
 
 
 def configured_image_capability(
@@ -813,21 +904,25 @@ def render_image_bootstrap_script(
         ).encode("utf-8")
     ).decode("ascii")
     token_b64 = base64.b64encode(token.encode("utf-8")).decode("ascii")
-    credential_lines: list[str] = []
+    private_writes = [
+        {"path": config_path, "contentB64": config_b64},
+        {"path": token_path, "contentB64": token_b64},
+    ]
     for path, secret in credential_writes:
         encoded = base64.b64encode(secret.encode("utf-8")).decode("ascii")
         if callable(register_secret):
             register_secret(encoded)
-        credential_lines.extend(
-            [
-                f"printf '%s' {shlex.quote(encoded)} | base64 -d > {shlex.quote(path)}",
-                f"chmod 600 {shlex.quote(path)}",
-            ]
+        private_writes.append({"path": path, "contentB64": encoded})
+    writes_b64 = base64.b64encode(
+        json.dumps(private_writes, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
         )
+    ).decode("ascii")
     if callable(register_secret):
         register_secret(config_b64)
         register_secret(token_b64)
         register_secret(expected_b64)
+        register_secret(writes_b64)
     q = shlex.quote
     return f"""#!/usr/bin/env bash
 set -Eeuo pipefail
@@ -857,12 +952,31 @@ bootstrap_path = bootstrap.get("path") if isinstance(bootstrap, dict) else value
 if bootstrap_path != "{BOOTSTRAP_PATH}":
     raise SystemExit("declared image bootstrap path mismatch")
 PYCAP
-install -d -m 700 {q(remote_root)} {q(posixpath.dirname(config_path))}
-printf '%s' {q(config_b64)} | base64 -d > "$CONFIG"
-printf '%s' {q(token_b64)} | base64 -d > "$TOKEN_FILE"
-chmod 600 "$CONFIG" "$TOKEN_FILE"
-{chr(10).join(credential_lines)}
-rm -f "$RECEIPT"
+"$PYTHON" - {q(remote_root)} {q(writes_b64)} "$RECEIPT" <<'PYPRIVATE'
+import base64,json,os,pathlib,sys
+runtime = pathlib.Path('/opt/agora-image-runtime')
+sys.path.insert(0, str(runtime))
+from assignment_transition import ensure_private_directory, preflight_private_root, private_atomic_write, verify_private_file
+root = pathlib.Path(os.path.abspath(sys.argv[1]))
+controller = root / 'controller-input'
+preflight_private_root(root)
+ensure_private_directory(controller, label='controller input')
+writes = json.loads(base64.b64decode(sys.argv[2], validate=True))
+for item in writes:
+    path = pathlib.Path(os.path.abspath(str(item['path'])))
+    try:
+        path.relative_to(controller)
+    except ValueError as exc:
+        raise SystemExit('private controller input escapes its root') from exc
+    private_atomic_write(path, base64.b64decode(item['contentB64'], validate=True))
+    verify_private_file(path, label='private controller input')
+receipt = pathlib.Path(os.path.abspath(sys.argv[3]))
+if receipt != root / 'bootstrap-receipt.json':
+    raise SystemExit('bootstrap receipt path is not canonical')
+if receipt.exists() or receipt.is_symlink():
+    verify_private_file(receipt, label='bootstrap receipt')
+    receipt.unlink()
+PYPRIVATE
 "$PYTHON" "$BOOTSTRAP" --config "$CONFIG" --token-file "$TOKEN_FILE" --receipt "$RECEIPT"
 test -r "$RECEIPT" || {{ echo 'image bootstrap receipt is missing' >&2; exit 79; }}
 EXPECTED_JSON="$(printf '%s' {q(expected_b64)} | base64 -d)" \
@@ -993,10 +1107,17 @@ def render_image_receipt_verification_script(
         ).encode("utf-8")
     ).decode("ascii")
     q = shlex.quote
-    return f"""RECEIPT={q(receipt_path)}
+    return f"""PYTHON={q(PYTHON_PATH)}
+RECEIPT={q(receipt_path)}
 CAPABILITY={q(CAPABILITY_PATH)}
 test -r "$RECEIPT" || {{ echo 'image bootstrap receipt is missing' >&2; exit 79; }}
 test -r "$CAPABILITY" || {{ echo 'declared image capability marker is missing' >&2; exit 78; }}
+"$PYTHON" - "$RECEIPT" <<'PYPRIVATE'
+import pathlib,sys
+sys.path.insert(0, '/opt/agora-image-runtime')
+from assignment_transition import verify_private_file
+verify_private_file(pathlib.Path(sys.argv[1]), label='bootstrap receipt')
+PYPRIVATE
 EXPECTED_IMAGE_RECEIPT="$(printf '%s' {q(encoded)} | base64 -d)"
 CAPABILITY_SHA="$(sha256sum "$CAPABILITY" | awk '{{print $1}}')"
 jq -e --argjson expected "$EXPECTED_IMAGE_RECEIPT" --arg capabilitySha "$CAPABILITY_SHA" '

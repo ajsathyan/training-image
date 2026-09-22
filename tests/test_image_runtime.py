@@ -795,6 +795,11 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
             return real_run(command, *args, **kwargs)
 
         patchers = [
+            mock.patch.object(
+                boot_start,
+                "ACTIVE_ROOT_POINTER",
+                root.parent / "active-root.json",
+            ),
             mock.patch.object(bootstrap, "RUNTIME_DIR", ROOT / "machine-runtime"),
             mock.patch.object(bootstrap, "TRAINING_SOURCE", Path("/opt/agora-source")),
             mock.patch.object(bootstrap, "STAGING_ROOT", staging_root),
@@ -847,7 +852,10 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
             )
         with mock.patch.dict(
             os.environ,
-            {"ASSIGNMENT_PROC_ROOT": str(root.parent / "synthetic-proc")},
+            {
+                "ASSIGNMENT_PROC_ROOT": str(root.parent / "synthetic-proc"),
+                "AGORA_ACTIVE_ROOT_POINTER": str(root.parent / "active-root.json"),
+            },
         ):
             (root.parent / "synthetic-proc").mkdir(exist_ok=True)
             entered = []
@@ -1205,13 +1213,8 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
                 (root / "bootstrap-receipt.json").read_text(encoding="utf-8")
             )
             self.assertEqual(persisted, newer)
-            self.assertEqual(
-                failed_receipt["status"], "boot_incomplete_recoverable"
-            )
-            incomplete = json.loads(
-                (root / "boot-incomplete.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(incomplete["assignmentGeneration"], 5)
+            self.assertEqual(failed_receipt["status"], "failed")
+            self.assertFalse((root / "boot-incomplete.json").exists())
 
     def test_postcommit_start_failure_keeps_target_and_exact_retry_finishes(
         self,
@@ -1235,8 +1238,14 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
             failed_receipt = json.loads(
                 (root / "bootstrap-receipt.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(failed_receipt["status"], "failed")
-            self.assertEqual(json.loads(first)["state"], "ready")
+            self.assertEqual(
+                failed_receipt["status"], "boot_incomplete_recoverable"
+            )
+            self.assertEqual(json.loads(first)["state"], "staged")
+            self.assertEqual(
+                json.loads((root / "training-intent.json").read_text())["desiredState"],
+                "paused",
+            )
 
             self.assertEqual(
                 self._invoke(
@@ -1250,9 +1259,11 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
             receipt = json.loads(
                 (root / "bootstrap-receipt.json").read_text(encoding="utf-8")
             )
-            self.assertEqual((root / "assignment.json").read_bytes(), first)
+            self.assertEqual(
+                json.loads((root / "assignment.json").read_text())["state"],
+                "ready",
+            )
             self.assertEqual(receipt["status"], "ready")
-            self.assertTrue(receipt["assignmentTransition"]["idempotent"])
             self.assertEqual(receipt["training"]["status"], "started")
 
     def test_rollback_lost_ack_replay_is_identical_and_idempotent(self) -> None:

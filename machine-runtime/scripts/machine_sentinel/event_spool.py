@@ -345,7 +345,7 @@ class EventSpool:
     ) -> dict[str, Any]:
         """Return one validated, immutable pending prefix without acknowledging it."""
 
-        required = (
+        stable_required = (
             "fleetId",
             "authorityEpoch",
             "launchId",
@@ -357,9 +357,8 @@ class EventSpool:
             "provider",
             "accountScope",
             "providerResourceId",
-            "bootId",
-            "setupRevision",
         )
+        required = (*stable_required, "bootId", "setupRevision")
         if any(expected_identity.get(key) in (None, "") for key in required):
             raise ValueError("Machine Sentinel export identity is incomplete")
         event_limit = max(1, min(int(max_events), 1000))
@@ -374,8 +373,9 @@ class EventSpool:
             for event in events[start : start + event_limit]:
                 identity = event.get("identity")
                 if not isinstance(identity, dict) or any(
-                    identity.get(key) != expected_identity.get(key) for key in required
-                ):
+                    identity.get(key) != expected_identity.get(key)
+                    for key in stable_required
+                ) or any(identity.get(key) in (None, "") for key in ("bootId", "setupRevision")):
                     raise RuntimeError(
                         "Machine Sentinel event lifecycle identity does not match the selected source"
                     )

@@ -795,6 +795,7 @@ def remote_assignment_stage_script(
     *,
     token_sha256: str | None = None,
     render: ScriptRenderers,
+    training_source_root: str | None = None,
 ) -> str:
     """Atomically stage assignment-bound config while leaving the machine stopped."""
 
@@ -811,7 +812,7 @@ def remote_assignment_stage_script(
 set -Eeuo pipefail
 ROOT={render.shell_quote(remote_root)}
 mkdir -p "$ROOT"
-{_assignment_shell_contract(context, render=render)}
+{_assignment_shell_contract(context, render=render, training_source_root=training_source_root)}
 assignment_guard_acquire
 if ! assignment_manifest_matches fenced && ! assignment_manifest_matches staged; then
   assignment_fail "matching fenced or staged assignment is required before staging"
@@ -838,13 +839,13 @@ mv -f "$machine_tmp" "$ROOT/machine.json"
 assignment_token_matches
 repair_tmp="$(mktemp "$ROOT/.repair-agora-client.assignment.XXXXXX")"
 cat > "$repair_tmp" <<'ASSIGNMENT_REPAIR_EOF'
-{_agora_client_repair_action(machine, render=render).rstrip()}
+{_agora_client_repair_action(machine, render=render, training_source_root=training_source_root).rstrip()}
 ASSIGNMENT_REPAIR_EOF
 chmod 700 "$repair_tmp"
 mv -f "$repair_tmp" "$ROOT/repair-agora-client.sh"
 supervisor_tmp="$(mktemp "$ROOT/.supervise-agora-gpu0.assignment.XXXXXX")"
 cat > "$supervisor_tmp" <<'ASSIGNMENT_SUPERVISOR_EOF'
-{_agora_supervisor_script(machine, render=render).rstrip()}
+{_agora_supervisor_script(machine, render=render, training_source_root=training_source_root).rstrip()}
 ASSIGNMENT_SUPERVISOR_EOF
 chmod 700 "$supervisor_tmp"
 mv -f "$supervisor_tmp" "$ROOT/supervise-agora-gpu0.sh"
@@ -1002,6 +1003,7 @@ def remote_assignment_restore_stopped_script(
     fenced_assignment_generation: int,
     token_sha256: str | None = None,
     render: ScriptRenderers,
+    training_source_root: str | None = None,
 ) -> str:
     """Restore pre-commit config while preserving a non-runnable remote fence."""
 
@@ -1028,7 +1030,7 @@ def remote_assignment_restore_stopped_script(
     return f"""#!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT={render.shell_quote(remote_root)}
-{_assignment_shell_contract(context, render=render)}
+{_assignment_shell_contract(context, render=render, training_source_root=training_source_root)}
 assignment_guard_acquire
 jq -e --arg operation {render.shell_quote(fenced_operation_id)} \
   --argjson generation {fenced_assignment_generation} \
@@ -1149,6 +1151,7 @@ def remote_assignment_ready_start_script(
     *,
     token_sha256: str,
     render: ScriptRenderers,
+    training_source_root: str | None = None,
 ) -> str:
     """Mark a staged assignment ready and request its guarded watchdog start."""
 
@@ -1161,7 +1164,7 @@ def remote_assignment_ready_start_script(
     return f"""#!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT={render.shell_quote(remote_root)}
-{_assignment_shell_contract(context, render=render)}
+{_assignment_shell_contract(context, render=render, training_source_root=training_source_root)}
 assignment_guard_acquire
 if ! assignment_manifest_matches staged && ! assignment_manifest_matches ready; then
   assignment_fail "matching staged or ready assignment is required before ready"
@@ -1169,7 +1172,7 @@ fi
 assignment_token_matches
 assignment_manifest_write ready
 assignment_guard_release
-{remote_watchdog_script(machine, render=render)}
+{remote_watchdog_script(machine, render=render, training_source_root=training_source_root)}
 printf '__AGORA_ASSIGNMENT_START_REQUESTED__ generation=%s operation=%s\\n' \
   {context['assignmentGeneration']} {render.shell_quote(context['operationId'])}
 """

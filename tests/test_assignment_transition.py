@@ -195,6 +195,7 @@ class AssignmentTransitionTests(unittest.TestCase):
             lock = root / "assignment.lock"
             lock.mkdir()
             (lock / "pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+            (lock / "pid").chmod(0o600)
             outcome: list[BaseException | str] = []
 
             def run_transition() -> None:

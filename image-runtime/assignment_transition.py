@@ -78,6 +78,15 @@ def _regular_private_file(path: Path, mode: int, *, label: str) -> os.stat_resul
     return metadata
 
 
+def verify_private_file(
+    path: Path, *, mode: int = 0o600, label: str = "private file"
+) -> os.stat_result:
+    """Verify ancestors plus one regular private file without resolving symlinks."""
+
+    _verify_no_symlink_ancestors(path.parent, label=label)
+    return _regular_private_file(path, mode, label=label)
+
+
 def ensure_private_directory(path: Path, *, label: str = "private directory") -> None:
     """Create and verify one managed private directory without following a symlink."""
 
@@ -127,6 +136,53 @@ def preflight_private_root(root: Path) -> None:
         probe.unlink()
     except OSError as exc:
         raise AssignmentTransitionError("private mode probe could not be removed") from exc
+
+
+def fence_failed_ready_assignment(
+    root: Path,
+    config: dict[str, Any],
+    *,
+    stop_owned: Callable[[], bool],
+) -> bool:
+    """Demote and stop only the exact ready assignment whose boot failed."""
+
+    with _assignment_lock(root):
+        current = _read_manifest(root / "assignment.json")
+        target = assignment_binding(config)
+        if (
+            current is None
+            or current.get("state") != "ready"
+            or not _same_binding(current, target)
+        ):
+            return False
+        private_atomic_write(
+            root / "assignment.json",
+            (
+                json.dumps(
+                    {**current, "state": "staged"},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8"),
+        )
+        private_atomic_write(
+            root / "training-intent.json",
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "assignmentGeneration": config["assignmentGeneration"],
+                        "operationId": config["assignmentOperationId"],
+                        "desiredState": "paused",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8"),
+        )
+        return bool(stop_owned())
 
 
 def assignment_binding(config: dict[str, Any]) -> dict[str, Any]:
@@ -179,7 +235,7 @@ def _validate_manifest(value: Any, *, label: str) -> dict[str, Any]:
 def _read_manifest(path: Path) -> dict[str, Any] | None:
     if not path.exists() and not path.is_symlink():
         return None
-    _regular_private_file(path, 0o600, label="assignment manifest")
+    verify_private_file(path, label="assignment manifest")
     try:
         return _validate_manifest(
             json.loads(path.read_text(encoding="utf-8")), label="assignment manifest"
@@ -220,11 +276,13 @@ def _assignment_lock(root: Path, *, timeout_seconds: float = 30.0) -> Iterator[N
                 raise AssignmentTransitionError(
                     "assignment lock metadata path already exists"
                 )
+            ensure_private_directory(lock, label="assignment lock")
             owner = ""
             try:
+                verify_private_file(lock / "pid", label="assignment lock owner")
                 owner = (lock / "pid").read_text(encoding="utf-8").strip()
-            except OSError:
-                pass
+            except FileNotFoundError:
+                owner = ""
             if owner.isdigit():
                 try:
                     os.kill(int(owner), 0)

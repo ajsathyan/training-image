@@ -81,7 +81,20 @@ class BootStartTests(unittest.TestCase):
             root = base / "runtime"
             canonical = root / "controller-input"
             canonical.mkdir(parents=True)
-            (canonical / "machine-config.json").write_text("{}", encoding="utf-8")
+            (canonical / "machine-config.json").write_text(
+                json.dumps(
+                    {
+                        "assignmentGeneration": 1,
+                        "assignmentOperationId": "operation-a",
+                        "remoteRoot": str(root),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (canonical / "machine-config.json").chmod(0o600)
+            (canonical / "hf-token").write_text("fixture-token", encoding="utf-8")
+            (canonical / "hf-token").chmod(0o600)
+            canonical.chmod(0o700)
             pointer = base / "active-root.json"
             pointer.write_text(
                 json.dumps(
@@ -103,6 +116,7 @@ class BootStartTests(unittest.TestCase):
                 mock.patch.object(boot, "STATUS", status),
                 mock.patch.object(boot, "_restore_saved_observation", return_value=0),
                 mock.patch.object(boot, "_saved_selection", return_value="stopped"),
+                mock.patch.object(boot, "_root_identity_digest", return_value="a" * 64),
             ):
                 self.assertEqual(boot.main({}), 0)
             self.assertEqual(json.loads(status.read_text())["state"], "stopped")

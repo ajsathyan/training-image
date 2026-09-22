@@ -247,7 +247,7 @@ ssh "${ssh_options[@]}" -p "$configured_port" root@127.0.0.1 '
     .machineGenerationId == "machine-generation-smoke" and
     .training.requested == false and
     .training.status == "staged" and
-    .optional.sentinel.status == "ready" and
+    .optional.sentinel.status == "started" and
     .optional.inspection.status == "ready" and
     .optional.px0.status == "ready"
   '\'' /workspace/agora-run/bootstrap-receipt.json >/dev/null
@@ -597,7 +597,7 @@ ssh "${ssh_options[@]}" -p "$training_port" root@127.0.0.1 '
   jq -e '\''
     .status == "ready" and .training.requested == true and .training.status == "started" and
     .heartbeat.requested == true and .heartbeat.status == "started" and
-    .optional.sentinel.status == "ready" and
+    .optional.sentinel.status == "started" and
     .optional.inspection.status == "unavailable" and
     .optional.px0.status == "blocked_by_inspection"
   '\'' "$root/bootstrap-receipt.json" >/dev/null

@@ -21,6 +21,21 @@ def _fingerprint(value: dict) -> str:
 
 
 class RuntimeExporterTests(unittest.TestCase):
+    def test_dockerfile_defaults_match_checked_in_runtime_source(self) -> None:
+        manifest = json.loads(
+            (ROOT / "machine-runtime" / "manifest.json").read_text(encoding="utf-8")
+        )
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        expected = {
+            "FLEET_SOURCE_COMMIT": manifest["source"]["commit"],
+            "FLEET_SOURCE_TREE": manifest["source"]["tree"],
+            "FLEET_SOURCE_ARTIFACT_FINGERPRINT": manifest["source"][
+                "artifactFingerprint"
+            ],
+        }
+        for name, value in expected.items():
+            self.assertIn(f"ARG {name}={value}\n", dockerfile)
+
     def test_checked_in_runtime_matches_its_generated_manifest(self) -> None:
         output = ROOT / "machine-runtime"
         manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))

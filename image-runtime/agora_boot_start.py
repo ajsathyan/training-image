@@ -24,6 +24,7 @@ from assignment_transition import (  # noqa: E402
     AssignmentTransitionError,
     ensure_private_directory,
     private_atomic_write,
+    verify_private_file,
 )
 
 SCHEMA = "agora.machine-boot-launch.v1"
@@ -161,17 +162,7 @@ def _read_active_root_pointer() -> dict[str, Any] | None:
     if not path.exists() and not path.is_symlink():
         return None
     try:
-        metadata = path.lstat()
-        parent = path.parent.lstat()
-        if (
-            stat.S_ISLNK(metadata.st_mode)
-            or not stat.S_ISREG(metadata.st_mode)
-            or stat.S_IMODE(metadata.st_mode) != 0o600
-            or stat.S_ISLNK(parent.st_mode)
-            or not stat.S_ISDIR(parent.st_mode)
-            or stat.S_IMODE(parent.st_mode) != 0o700
-        ):
-            raise BootInputError("active root pointer has unsafe type or mode")
+        verify_private_file(path, label="active root pointer")
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise BootInputError("active root pointer is unavailable or corrupt") from exc
@@ -188,7 +179,9 @@ def _read_active_root_pointer() -> dict[str, Any] | None:
     return value
 
 
-def _record_active_root(config: Mapping[str, Any]) -> None:
+def _record_active_root(
+    config: Mapping[str, Any], *, rollback_authorized: bool = False
+) -> None:
     root = _normalized_remote_root(config.get("remoteRoot"))
     identity = _root_identity(config)
     wanted = {
@@ -202,7 +195,7 @@ def _record_active_root(config: Mapping[str, Any]) -> None:
     if current is not None:
         current_generation = int(current["assignmentGeneration"])
         wanted_generation = int(wanted["assignmentGeneration"])
-        if wanted_generation < current_generation:
+        if wanted_generation < current_generation and not rollback_authorized:
             raise BootInputError("launch root pointer is older than saved assignment")
         if wanted_generation == current_generation and any(
             current.get(key) != wanted.get(key)
@@ -432,6 +425,10 @@ def _apply_provider_metadata(
 def _saved_boot(root: Path, environment: Mapping[str, str]) -> int:
     canonical = root / "controller-input"
     try:
+        verify_private_file(
+            canonical / "machine-config.json", label="saved machine configuration"
+        )
+        verify_private_file(canonical / "hf-token", label="saved HF token")
         config = json.loads(
             (canonical / "machine-config.json").read_text(encoding="utf-8")
         )
@@ -446,7 +443,6 @@ def _saved_boot(root: Path, environment: Mapping[str, str]) -> int:
         wait_seconds=_metadata_wait_seconds(environment),
     )
     _apply_provider_metadata(config, resource, port, refresh_port=True)
-    _record_active_root(config)
     return _run_bootstrap(config, token, persist=True)
 
 
@@ -500,12 +496,29 @@ def main(environment: Mapping[str, str] | None = None) -> int:
         canonical = saved_root / "controller-input"
         if (canonical / "machine-config.json").is_file():
             try:
+                verify_private_file(
+                    canonical / "machine-config.json",
+                    label="saved machine configuration",
+                )
+                verify_private_file(canonical / "hf-token", label="saved HF token")
                 saved_config = json.loads(
                     (canonical / "machine-config.json").read_text(encoding="utf-8")
                 )
                 saved_generation = saved_config.get("assignmentGeneration")
                 if not isinstance(saved_generation, int):
                     raise BootInputError("saved controller input is corrupt")
+                if (
+                    _root_identity_digest(saved_config)
+                    != pointer.get("identitySha256")
+                    or saved_generation != pointer.get("assignmentGeneration")
+                    or saved_config.get("assignmentOperationId")
+                    != pointer.get("assignmentOperationId")
+                    or str(_normalized_remote_root(saved_config.get("remoteRoot")))
+                    != str(saved_root)
+                ):
+                    raise BootInputError(
+                        "active root pointer does not match saved controller identity"
+                    )
                 if (
                     _saved_selection(
                         saved_root,
@@ -590,7 +603,6 @@ def main(environment: Mapping[str, str] | None = None) -> int:
                 wait_seconds=_metadata_wait_seconds(environment),
             )
             _apply_provider_metadata(config, resource, port)
-            _record_active_root(config)
             rc = _run_bootstrap(config, token, persist=True)
         if rc != 0:
             raise BootInputError(f"canonical bootstrap exited with status {rc}")

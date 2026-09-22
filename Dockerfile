@@ -80,9 +80,9 @@ RUN curl -fsSLo /tmp/px0 "https://github.com/px0-ai/px0/releases/download/v${PX0
     && rm -f /tmp/px0 \
     && px0 -version
 
-ARG FLEET_SOURCE_COMMIT=3df74741f9f3faf3eebe036e6c0750887d905e71
-ARG FLEET_SOURCE_TREE=e1f2e90e79af7ae5a16bd5c84acaf7eac31ffca2
-ARG FLEET_SOURCE_ARTIFACT_FINGERPRINT=6267c9555c9cab647127ae123fd18329c11cb8b075b4983ae25b1d2b5fbd4a1a
+ARG FLEET_SOURCE_COMMIT=8b6589faebac694450fd7a2d0b017c063fb86874
+ARG FLEET_SOURCE_TREE=919139ff46d67414dbd2a34535943fcce7a95303
+ARG FLEET_SOURCE_ARTIFACT_FINGERPRINT=ef65d44102ba4afe6dc23d5ad0518e37b56d507636cc37eb18c5d175440043ef
 
 COPY machine-runtime /opt/agora-machine-runtime
 COPY image-runtime /opt/agora-image-runtime
