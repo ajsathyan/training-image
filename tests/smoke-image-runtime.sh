@@ -136,17 +136,8 @@ wait_for_ssh "$neutral_port"
 wait_for_bootstrap "$neutral"
 neutral_ready="$(date +%s)"
 
-ssh "${ssh_options[@]}" -p "$neutral_port" root@127.0.0.1 '
-  set -Eeuo pipefail
-  test "$(cat /run/agora-image-bootstrap.status)" = 0
-  grep -q "no machine configuration" /var/log/agora-image-bootstrap.log
-  ! tmux has-session -t agora_gpu 2>/dev/null
-  ! tmux has-session -t agora_sentinel 2>/dev/null
-  ! tmux has-session -t agora_px0 2>/dev/null
-  test ! -e /workspace/agora-run/bootstrap-receipt.json
-  pgrep -x sshd >/dev/null
-  pgrep -x cron >/dev/null
-'
+ssh "${ssh_options[@]}" -p "$neutral_port" root@127.0.0.1 \
+  'bash -s' < "$SCRIPT_DIR/assert-neutral-image-runtime.sh"
 
 invalid_secret="hf_invalid_smoke_secret_must_not_escape"
 docker run -d --name "$invalid" \
