@@ -379,7 +379,9 @@ PY
 
 # Exercise stale-stage rejection, rollback, and lost-ACK replay using only the
 # exported Fleet production builders for configs and manifests.
-cp -p "$state/controller-input/machine-config.json" "$work/configured-stage-config.json"
+docker exec "$configured" cat \
+  /workspace/agora-run/controller-input/machine-config.json \
+  > "$work/configured-stage-config.json"
 jq \
   '.assignmentGeneration = 5 |
    .assignmentOperationId = "assignment-operation-newer" |
@@ -391,9 +393,10 @@ python3 "$REPO_ROOT/tests/generate_machine_image_config.py" manifest \
   --token-sha256 "$token_hash" \
   --state fenced \
   --output "$work/configured-newer-fence.json"
-cp "$work/configured-newer-fence.json" "$state/.assignment.newer.json"
-chmod 600 "$state/.assignment.newer.json"
-mv "$state/.assignment.newer.json" "$state/assignment.json"
+docker cp "$work/configured-newer-fence.json" \
+  "$configured:/workspace/agora-run/.assignment.newer.json"
+docker exec "$configured" sh -c \
+  'chmod 600 /workspace/agora-run/.assignment.newer.json && mv /workspace/agora-run/.assignment.newer.json /workspace/agora-run/assignment.json'
 newer_fence_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/assignment.json | awk '{print $1}')"
 set +e
 docker exec "$configured" /opt/agora-venv/bin/python \
@@ -409,12 +412,16 @@ test "$(docker exec "$configured" sha256sum /workspace/agora-run/assignment.json
 python3 "$REPO_ROOT/tests/generate_machine_image_config.py" config \
   --machine "$work/configured-machine.json" \
   --token-sha256 "$token_hash" \
-  --output "$state/controller-input/machine-config.json" \
+  --output "$work/configured-rollback-config.json" \
   --sentinel "$work/configured-sentinel.json" \
   --transition-kind rollback_prior \
   --expected-machine "$work/configured-newer-machine.json" \
   --expected-token-sha256 "$token_hash" \
   --expected-state fenced
+docker cp "$work/configured-rollback-config.json" \
+  "$configured:/workspace/agora-run/controller-input/.machine-config.rollback"
+docker exec "$configured" sh -c \
+  'chmod 600 /workspace/agora-run/controller-input/.machine-config.rollback && mv /workspace/agora-run/controller-input/.machine-config.rollback /workspace/agora-run/controller-input/machine-config.json'
 docker exec "$configured" /opt/agora-venv/bin/python \
   /opt/agora-image-runtime/agora_image_bootstrap.py \
   > "$work/image-smoke-rollback.log" 2>&1
@@ -433,7 +440,10 @@ docker exec "$configured" jq -e '.status == "ready" and
   .assignmentTransition.kind == "rollback_prior" and
   .assignmentTransition.idempotent == true' \
   /workspace/agora-run/bootstrap-receipt.json >/dev/null
-mv "$work/configured-stage-config.json" "$state/controller-input/machine-config.json"
+docker cp "$work/configured-stage-config.json" \
+  "$configured:/workspace/agora-run/controller-input/.machine-config.stage"
+docker exec "$configured" sh -c \
+  'chmod 600 /workspace/agora-run/controller-input/.machine-config.stage && mv /workspace/agora-run/controller-input/.machine-config.stage /workspace/agora-run/controller-input/machine-config.json'
 docker exec "$configured" /opt/agora-venv/bin/python \
   /opt/agora-image-runtime/agora_image_bootstrap.py \
   > "$work/image-smoke-restage.log" 2>&1
