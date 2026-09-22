@@ -93,6 +93,30 @@ def write_manifest(root: Path, value: dict[str, object]) -> None:
 
 
 class AssignmentTransitionTests(unittest.TestCase):
+    def test_failed_ready_fence_stops_before_any_durable_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            value = config(root, kind="ready")
+            write_manifest(root, manifest(value, "ready"))
+            calls: list[str] = []
+
+            def stop_owned() -> bool:
+                calls.append("stop")
+                return True
+
+            with mock.patch.object(
+                transition,
+                "private_atomic_write",
+                side_effect=transition.AssignmentTransitionError("disk full"),
+            ):
+                with self.assertRaisesRegex(
+                    transition.AssignmentTransitionError, "disk full"
+                ):
+                    transition.fence_failed_ready_assignment(
+                        root, value, stop_owned=stop_owned
+                    )
+            self.assertEqual(calls, ["stop"])
+
     def test_private_preflight_repairs_modes_before_first_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "runtime"

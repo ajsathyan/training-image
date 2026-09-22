@@ -155,6 +155,12 @@ def fence_failed_ready_assignment(
             or not _same_binding(current, target)
         ):
             return False
+        stopped = False
+        stop_error: BaseException | None = None
+        try:
+            stopped = bool(stop_owned())
+        except BaseException as exc:
+            stop_error = exc
         private_atomic_write(
             root / "assignment.json",
             (
@@ -182,7 +188,9 @@ def fence_failed_ready_assignment(
                 + "\n"
             ).encode("utf-8"),
         )
-        return bool(stop_owned())
+        if stop_error is not None:
+            raise stop_error
+        return stopped
 
 
 def assignment_binding(config: dict[str, Any]) -> dict[str, Any]:

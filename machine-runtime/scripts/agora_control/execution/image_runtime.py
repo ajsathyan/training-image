@@ -661,8 +661,12 @@ def build_machine_image_config(
     operation_id = _text(machine, "assignmentOperationId", error=error)
     remote_root = _remote_root(machine, error=error)
     sentinel_url = str(sentinel.get("url") or "").strip()
-    sentinel_remote = bool(sentinel.get("exportEnabled", True)) and bool(
-        sentinel_url
+    sentinel_mode = str(sentinel.get("mode") or "").strip().lower()
+    sentinel_deferred = sentinel_mode == "deferred_reassignment_rotation_required"
+    sentinel_remote = (
+        not sentinel_deferred
+        and bool(sentinel.get("exportEnabled", True))
+        and bool(sentinel_url)
     )
     try:
         sentinel_timeout = float(sentinel.get("timeoutSeconds", 10))
@@ -671,7 +675,13 @@ def build_machine_image_config(
     if not math.isfinite(sentinel_timeout) or sentinel_timeout <= 0:
         raise error("declared image setup has invalid Sentinel timeoutSeconds")
     sentinel_config: dict[str, Any] = {
-        "mode": "remote" if sentinel_remote else "local",
+        "mode": (
+            "deferred_reassignment_rotation_required"
+            if sentinel_deferred
+            else "remote"
+            if sentinel_remote
+            else "local"
+        ),
         "url": sentinel_url if sentinel_remote else "",
         "timeoutSeconds": sentinel_timeout,
     }

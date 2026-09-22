@@ -767,6 +767,11 @@ def _sentinel(
 ) -> dict[str, Any]:
     sentinel = config["sentinel"]
     mode = str(sentinel.get("mode") or "local").strip().lower()
+    if mode == "deferred_reassignment_rotation_required":
+        return {
+            "status": "deferred_reassignment_rotation_required",
+            "detail": "prior Sentinel was fenced; registration must rotate exact identity",
+        }
     url = str(sentinel.get("url") or "").strip()
     bootstrap_path = _sentinel_secret_path(root, sentinel, "bootstrapTokenFile")
     machine_path = _sentinel_secret_path(root, sentinel, "machineTokenFile")

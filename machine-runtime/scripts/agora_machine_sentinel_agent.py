@@ -377,6 +377,8 @@ def initial_runtime_state(
         "provider",
         "accountScope",
         "providerResourceId",
+        "assignmentOperationId",
+        "assignmentGeneration",
     ):
         if identity.get(field) is not None:
             state["identity"][field] = identity[field]
@@ -415,6 +417,8 @@ def reconcile_runtime_identity(
             "provider",
             "accountScope",
             "providerResourceId",
+            "assignmentOperationId",
+            "assignmentGeneration",
         ):
             installed = identity.get(field)
             persisted = current.get(field)

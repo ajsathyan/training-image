@@ -350,7 +350,7 @@ def _saved_selection(root: Path, launch: Mapping[str, Any]) -> str:
         return "stopped"
     if intent.get("desiredState") == "paused":
         return "stopped"
-    if generation > launch_generation:
+    if generation >= launch_generation:
         return "saved"
     return "launch"
 
@@ -541,20 +541,7 @@ def main(environment: Mapping[str, str] | None = None) -> int:
             except (OSError, json.JSONDecodeError, BootInputError):
                 _status("stopped", "saved controller input is corrupt")
                 return 0
-            rc = subprocess.run(
-                [
-                    str(PYTHON),
-                    str(BOOTSTRAP),
-                    "--config",
-                    str(canonical / "machine-config.json"),
-                    "--token-file",
-                    str(canonical / "hf-token"),
-                    "--receipt",
-                    str(saved_root / "bootstrap-receipt.json"),
-                    "--boot-resume",
-                ],
-                check=False,
-            ).returncode
+            rc = _saved_boot(saved_root, environment)
             _status(
                 "ready" if rc == 0 else "failed",
                 "canonical controller input completed"

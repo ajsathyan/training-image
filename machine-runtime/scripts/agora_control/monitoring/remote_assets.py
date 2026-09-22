@@ -245,6 +245,21 @@ def machine_sentinel_identity(machine: dict[str, Any], settings: dict[str, Any],
                 raise FleetError(f"Machine Sentinel identity is missing {key}")
         elif not isinstance(value, str) or not value:
             raise FleetError(f"Machine Sentinel identity is missing {key}")
+    assignment_operation_id = machine.get("assignmentOperationId")
+    assignment_generation = machine.get("assignmentGeneration")
+    if assignment_operation_id is not None or assignment_generation is not None:
+        if (
+            not isinstance(assignment_operation_id, str)
+            or not assignment_operation_id
+            or not isinstance(assignment_generation, int)
+            or isinstance(assignment_generation, bool)
+            or assignment_generation < 1
+        ):
+            raise FleetError("Machine Sentinel assignment identity is incomplete")
+        values.update(
+            assignmentOperationId=assignment_operation_id,
+            assignmentGeneration=assignment_generation,
+        )
     if settings.get("includeProviderBindingIdentity") is True:
         provider_identity_source = machine.get("providerIdentitySource")
         if provider_identity_source is None:

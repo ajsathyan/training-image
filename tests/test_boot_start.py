@@ -271,6 +271,12 @@ class BootStartTests(unittest.TestCase):
                 ),
                 "saved",
             )
+            self.assertEqual(
+                boot._saved_selection(
+                    root, {"config": {"assignmentGeneration": 2}}
+                ),
+                "saved",
+            )
 
     def test_bootstrap_child_environment_excludes_launch_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

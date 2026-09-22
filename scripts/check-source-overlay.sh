@@ -19,8 +19,11 @@ python3 -m py_compile \
 python3 -m unittest \
   tests.provider.test_global_capacity_wiring \
   tests.provider.test_prepared_assignment_bridge \
+  tests.provider.test_local_assignment_runtime \
   tests.machine_sentinel.test_event_spool \
-  tests.operations.test_px0_link
+  tests.operations.test_px0_link \
+  tests.agora_fleet.vast_local_lifecycle \
+  tests.execution.test_image_runtime_setup.ImageRuntimeAdapterTests.test_registered_sentinel_actual_producer_state_parses_as_controller_proof
 
 cd "$work/image"
 bash -n start.sh
