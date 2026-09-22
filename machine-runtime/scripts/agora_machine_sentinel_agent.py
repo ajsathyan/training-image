@@ -370,10 +370,15 @@ def initial_runtime_state(
         authority_epoch=authority_epoch,
     )
     for field in (
+        "fleetId",
+        "launchId",
+        "slotId",
         "machineGenerationId",
         "provider",
         "accountScope",
         "providerResourceId",
+        "assignmentOperationId",
+        "assignmentGeneration",
     ):
         if identity.get(field) is not None:
             state["identity"][field] = identity[field]
@@ -405,10 +410,15 @@ def reconcile_runtime_identity(
                 )
         identity_hydrated = False
         for field in (
+            "fleetId",
+            "launchId",
+            "slotId",
             "machineGenerationId",
             "provider",
             "accountScope",
             "providerResourceId",
+            "assignmentOperationId",
+            "assignmentGeneration",
         ):
             installed = identity.get(field)
             persisted = current.get(field)
@@ -467,7 +477,14 @@ def normalize_provisioning_origin(value: str) -> str:
     raise ValueError("Machine Sentinel provisioning origin is invalid")
 
 
-def refresh_local_evidence(sentinel: MachineSentinel, root: Path, observed_at: str, *, runner=subprocess.run) -> None:
+def refresh_local_evidence(
+    sentinel: MachineSentinel,
+    root: Path,
+    observed_at: str,
+    *,
+    training_source_root: Path | None = None,
+    runner=subprocess.run,
+) -> None:
     env = parse_env_file(root / "agora.env")
     announce_port = env.get("ANNOUNCE_PORT", "")
     if announce_port.isdigit() and int(announce_port) > 0:
@@ -501,7 +518,11 @@ def refresh_local_evidence(sentinel: MachineSentinel, root: Path, observed_at: s
     owned_process_identity = None
     if session_observed and fields[3].isdigit():
         owned_process = runner(
-            owned_process_probe_command(root, int(fields[3])),
+            owned_process_probe_command(
+                root,
+                int(fields[3]),
+                training_source_root=training_source_root,
+            ),
             text=True,
             capture_output=True,
             timeout=5,
@@ -814,6 +835,7 @@ def main() -> int:
     parser.add_argument("--credential-env-file", required=True)
     parser.add_argument("--state-file", required=True)
     parser.add_argument("--root", required=True)
+    parser.add_argument("--training-source-root", default="")
     parser.add_argument("--setup-revision", required=True)
     parser.add_argument(
         "--provisioning-origin",
@@ -835,6 +857,14 @@ def main() -> int:
         raise ValueError("Machine Sentinel remote export requires an ingress URL")
 
     root = Path(args.root)
+    training_source_root = (
+        Path(args.training_source_root) if args.training_source_root else None
+    )
+    if training_source_root is not None and (
+        not training_source_root.is_absolute()
+        or ".." in training_source_root.parts
+    ):
+        raise ValueError("Machine Sentinel training source root must be absolute")
     identity = load_identity(Path(args.identity_file))
     state_path = Path(args.state_file)
     store = JsonStateStore(
@@ -877,7 +907,12 @@ def main() -> int:
         monotonic_now = time.monotonic()
         if monotonic_now >= local_due:
             observed_at = iso_now()
-            refresh_local_evidence(sentinel, root, observed_at)
+            refresh_local_evidence(
+                sentinel,
+                root,
+                observed_at,
+                training_source_root=training_source_root,
+            )
             reconcile_local_commands(sentinel, root, observed_at)
             local_due = monotonic_now + LOCAL_OBSERVE_INTERVAL_SECONDS
         else:

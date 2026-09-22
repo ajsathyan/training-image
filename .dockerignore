@@ -6,5 +6,7 @@
 !image-runtime/**
 !machine-runtime/
 !machine-runtime/**
+!tests/process-composition-training-source/
+!tests/process-composition-training-source/**
 **/__pycache__/
 **/*.pyc

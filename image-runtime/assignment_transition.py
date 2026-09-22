@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
 import stat
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +37,160 @@ BINDING_KEYS = (
 
 class AssignmentTransitionError(RuntimeError):
     pass
+
+
+def _verify_no_symlink_ancestors(path: Path, *, label: str) -> None:
+    """Reject symlinks/non-directories in every existing path component."""
+
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise AssignmentTransitionError(f"{label} ancestor is unavailable") from exc
+        darwin_system_link = (
+            stat.S_ISLNK(metadata.st_mode)
+            and sys.platform == "darwin"
+            and str(current) in {"/var", "/tmp"}
+            and str(current.resolve()) in {"/private/var", "/private/tmp"}
+        )
+        if (stat.S_ISLNK(metadata.st_mode) and not darwin_system_link) or (
+            not stat.S_ISDIR(metadata.st_mode) and not darwin_system_link
+        ):
+            raise AssignmentTransitionError(
+                f"{label} ancestors must be non-symlink directories"
+            )
+
+
+def _regular_private_file(path: Path, mode: int, *, label: str) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise AssignmentTransitionError(f"{label} is unavailable") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise AssignmentTransitionError(f"{label} must be a regular non-symlink file")
+    if stat.S_IMODE(metadata.st_mode) != mode:
+        raise AssignmentTransitionError(f"{label} must be mode {mode:04o}")
+    return metadata
+
+
+def verify_private_file(
+    path: Path, *, mode: int = 0o600, label: str = "private file"
+) -> os.stat_result:
+    """Verify ancestors plus one regular private file without resolving symlinks."""
+
+    _verify_no_symlink_ancestors(path.parent, label=label)
+    return _regular_private_file(path, mode, label=label)
+
+
+def ensure_private_directory(path: Path, *, label: str = "private directory") -> None:
+    """Create and verify one managed private directory without following a symlink."""
+
+    _verify_no_symlink_ancestors(path.parent, label=label)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise AssignmentTransitionError(f"{label} could not be created") from exc
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise AssignmentTransitionError(f"{label} is unavailable") from exc
+    except OSError as exc:
+        raise AssignmentTransitionError(f"{label} is unavailable") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise AssignmentTransitionError(f"{label} must be a non-symlink directory")
+    try:
+        os.chmod(path, 0o700, follow_symlinks=False)
+        metadata = path.lstat()
+    except (NotImplementedError, OSError) as exc:
+        raise AssignmentTransitionError(f"{label} cannot enforce mode 0700") from exc
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise AssignmentTransitionError(f"{label} must remain mode 0700")
+
+
+def preflight_private_root(root: Path) -> None:
+    """Prove the selected root honors private POSIX file modes before secrets land."""
+
+    _verify_no_symlink_ancestors(root.parent, label="private runtime root")
+    if root.exists() or root.is_symlink():
+        ensure_private_directory(root, label="private runtime root")
+    else:
+        try:
+            root.mkdir(parents=True, mode=0o700)
+        except OSError as exc:
+            raise AssignmentTransitionError("private runtime root could not be created") from exc
+        ensure_private_directory(root, label="private runtime root")
+    probe = root / f".private-mode-probe.{os.getpid()}"
+    private_atomic_write(probe, b"mode-probe\n")
+    _regular_private_file(probe, 0o600, label="private mode probe")
+    try:
+        probe.unlink()
+    except OSError as exc:
+        raise AssignmentTransitionError("private mode probe could not be removed") from exc
+
+
+def fence_failed_ready_assignment(
+    root: Path,
+    config: dict[str, Any],
+    *,
+    stop_owned: Callable[[], bool],
+) -> bool:
+    """Demote and stop only the exact ready assignment whose boot failed."""
+
+    with _assignment_lock(root):
+        current = _read_manifest(root / "assignment.json")
+        target = assignment_binding(config)
+        if (
+            current is None
+            or current.get("state") != "ready"
+            or not _same_binding(current, target)
+        ):
+            return False
+        stopped = False
+        stop_error: BaseException | None = None
+        try:
+            stopped = bool(stop_owned())
+        except BaseException as exc:
+            stop_error = exc
+        private_atomic_write(
+            root / "assignment.json",
+            (
+                json.dumps(
+                    {**current, "state": "staged"},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8"),
+        )
+        private_atomic_write(
+            root / "training-intent.json",
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "assignmentGeneration": config["assignmentGeneration"],
+                        "operationId": config["assignmentOperationId"],
+                        "desiredState": "paused",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8"),
+        )
+        if stop_error is not None:
+            raise stop_error
+        return stopped
 
 
 def assignment_binding(config: dict[str, Any]) -> dict[str, Any]:
@@ -85,16 +241,9 @@ def _validate_manifest(value: Any, *, label: str) -> dict[str, Any]:
 
 
 def _read_manifest(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
+    if not path.exists() and not path.is_symlink():
         return None
-    if (
-        path.is_symlink()
-        or not path.is_file()
-        or stat.S_IMODE(path.stat().st_mode) != 0o600
-    ):
-        raise AssignmentTransitionError(
-            "assignment manifest must be a regular 0600 file"
-        )
+    verify_private_file(path, label="assignment manifest")
     try:
         return _validate_manifest(
             json.loads(path.read_text(encoding="utf-8")), label="assignment manifest"
@@ -112,16 +261,36 @@ def _assignment_lock(root: Path, *, timeout_seconds: float = 30.0) -> Iterator[N
     lock = root / "assignment.lock"
     deadline = time.monotonic() + timeout_seconds
     while True:
+        created_lock = False
         try:
             lock.mkdir(mode=0o700)
-            (lock / "pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+            created_lock = True
+            descriptor = os.open(
+                lock / "pid",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(f"{os.getpid()}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
             break
         except FileExistsError:
+            if created_lock:
+                try:
+                    lock.rmdir()
+                except OSError:
+                    pass
+                raise AssignmentTransitionError(
+                    "assignment lock metadata path already exists"
+                )
+            ensure_private_directory(lock, label="assignment lock")
             owner = ""
             try:
+                verify_private_file(lock / "pid", label="assignment lock owner")
                 owner = (lock / "pid").read_text(encoding="utf-8").strip()
-            except OSError:
-                pass
+            except FileNotFoundError:
+                owner = ""
             if owner.isdigit():
                 try:
                     os.kill(int(owner), 0)
@@ -137,6 +306,13 @@ def _assignment_lock(root: Path, *, timeout_seconds: float = 30.0) -> Iterator[N
             if time.monotonic() >= deadline:
                 raise AssignmentTransitionError("timed out acquiring assignment lock")
             time.sleep(0.25)
+        except OSError as exc:
+            if created_lock:
+                try:
+                    lock.rmdir()
+                except OSError:
+                    pass
+            raise AssignmentTransitionError("assignment lock could not be created") from exc
     try:
         yield
     finally:
@@ -148,29 +324,64 @@ def _assignment_lock(root: Path, *, timeout_seconds: float = 30.0) -> Iterator[N
 
 
 def _write_manifest(path: Path, value: dict[str, Any]) -> None:
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.next")
-    temporary.write_text(
-        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
+    private_atomic_write(
+        path,
+        (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        ),
     )
-    temporary.chmod(0o600)
-    with temporary.open("rb") as stream:
-        os.fsync(stream.fileno())
-    temporary.replace(path)
 
 
 def private_atomic_write(path: Path, data: bytes, *, mode: int = 0o600) -> None:
     """Write one private durable file with the assignment lock already held."""
 
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.parent.chmod(0o700)
+    if mode not in {0o600, 0o700}:
+        raise AssignmentTransitionError("private file mode must be 0600 or 0700")
+    _verify_no_symlink_ancestors(path.parent, label="private file parent")
+    if not path.parent.exists():
+        try:
+            path.parent.mkdir(parents=True, mode=0o700)
+        except OSError as exc:
+            raise AssignmentTransitionError("private file parent could not be created") from exc
+    ensure_private_directory(path.parent, label="private file parent")
+    if path.exists() or path.is_symlink():
+        try:
+            existing = path.lstat()
+        except OSError as exc:
+            raise AssignmentTransitionError("private destination is unavailable") from exc
+        if stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode):
+            raise AssignmentTransitionError(
+                "private destination must be a regular non-symlink file"
+            )
     temporary = path.with_name(f".{path.name}.{os.getpid()}.next")
-    with temporary.open("wb") as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-    temporary.chmod(mode)
-    temporary.replace(path)
+    if temporary.exists() or temporary.is_symlink():
+        raise AssignmentTransitionError("private temporary path already exists")
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = -1
+    try:
+        descriptor = os.open(temporary, flags, mode)
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            descriptor = -1
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _regular_private_file(temporary, mode, label="private temporary file")
+        os.replace(temporary, path)
+        os.chmod(path, mode, follow_symlinks=False)
+        _regular_private_file(path, mode, label="private destination")
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise AssignmentTransitionError("private path cannot be a symlink") from exc
+        raise AssignmentTransitionError("private atomic write failed") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary.exists() and not temporary.is_symlink():
+            with contextlib.suppress(OSError):
+                temporary.unlink()
     directory_fd = os.open(path.parent, os.O_RDONLY)
     try:
         os.fsync(directory_fd)

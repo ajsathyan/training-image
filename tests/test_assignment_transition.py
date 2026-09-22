@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +93,78 @@ def write_manifest(root: Path, value: dict[str, object]) -> None:
 
 
 class AssignmentTransitionTests(unittest.TestCase):
+    def test_failed_ready_fence_stops_before_any_durable_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            value = config(root, kind="ready")
+            write_manifest(root, manifest(value, "ready"))
+            calls: list[str] = []
+
+            def stop_owned() -> bool:
+                calls.append("stop")
+                return True
+
+            with mock.patch.object(
+                transition,
+                "private_atomic_write",
+                side_effect=transition.AssignmentTransitionError("disk full"),
+            ):
+                with self.assertRaisesRegex(
+                    transition.AssignmentTransitionError, "disk full"
+                ):
+                    transition.fence_failed_ready_assignment(
+                        root, value, stop_owned=stop_owned
+                    )
+            self.assertEqual(calls, ["stop"])
+
+    def test_private_preflight_repairs_modes_before_first_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "runtime"
+            root.mkdir(mode=0o777)
+            transition.preflight_private_root(root)
+            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+            destination = root / "private.json"
+            transition.private_atomic_write(destination, b"{}\n")
+            self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
+
+    def test_private_writes_reject_symlinks_and_existing_temporary_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            actual = base / "actual"
+            actual.mkdir(mode=0o700)
+            linked = base / "linked"
+            linked.symlink_to(actual, target_is_directory=True)
+            with self.assertRaisesRegex(
+                transition.AssignmentTransitionError, "ancestors"
+            ):
+                transition.private_atomic_write(linked / "secret", b"secret")
+
+            root = base / "runtime"
+            root.mkdir(mode=0o700)
+            dangling = root / "secret"
+            dangling.symlink_to(root / "missing")
+            with self.assertRaisesRegex(
+                transition.AssignmentTransitionError, "destination"
+            ):
+                transition.private_atomic_write(dangling, b"secret")
+
+            dangling.unlink()
+            temporary = root / f".secret.{os.getpid()}.next"
+            temporary.write_text("occupied", encoding="utf-8")
+            with self.assertRaisesRegex(
+                transition.AssignmentTransitionError, "temporary"
+            ):
+                transition.private_atomic_write(root / "secret", b"secret")
+
+    def test_private_preflight_fails_when_final_mode_cannot_be_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "runtime"
+            with mock.patch.object(transition.os, "chmod", side_effect=OSError("denied")):
+                with self.assertRaisesRegex(
+                    transition.AssignmentTransitionError, "cannot enforce mode"
+                ):
+                    transition.preflight_private_root(root)
+
     def test_stage_ready_and_same_binding_replay_are_exact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -146,6 +219,7 @@ class AssignmentTransitionTests(unittest.TestCase):
             lock = root / "assignment.lock"
             lock.mkdir()
             (lock / "pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+            (lock / "pid").chmod(0o600)
             outcome: list[BaseException | str] = []
 
             def run_transition() -> None:

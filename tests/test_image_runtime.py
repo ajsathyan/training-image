@@ -140,6 +140,58 @@ class ImageBootstrapContractTests(unittest.TestCase):
         )
         self.assertEqual({key: identity[key] for key in expected}, expected)
 
+    def test_local_sentinel_verifies_canonical_rendered_machine_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "agora-run"
+            root.mkdir(mode=0o700)
+            normalized, _ = bootstrap._validated(valid_config(root), "token")
+            machine = bootstrap._sentinel_machine(normalized)
+            rendered_identity = remote_assets.machine_sentinel_identity(
+                machine,
+                {
+                    "fleetId": "fleet-a",
+                    "authorityEpoch": 5,
+                    "includeProviderBindingIdentity": True,
+                    "setupRevision": "fixture-setup-revision",
+                },
+                FleetError=bootstrap.BootstrapError,
+            )
+            rendered_identity.update(
+                authorityEpoch=5,
+                bootId="fixture-boot-id",
+                setupRevision="fixture-setup-revision",
+            )
+            state_dir = root / "machine-sentinel"
+            state_dir.mkdir(mode=0o700)
+            state_path = state_dir / "state.json"
+            state_path.write_text(
+                json.dumps({"identity": rendered_identity}), encoding="utf-8"
+            )
+            state_path.chmod(0o600)
+            sentinel_assets = mock.Mock()
+            sentinel_assets.machine_sentinel_identity = (
+                remote_assets.machine_sentinel_identity
+            )
+            sentinel_assets.remote_machine_sentinel_install_body.return_value = ":"
+
+            with mock.patch.object(
+                bootstrap.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ):
+                result = bootstrap._sentinel(root, normalized, sentinel_assets)
+
+        self.assertEqual(result["status"], "started")
+        self.assertEqual(result["machineId"], "machine-a")
+        self.assertNotIn("machineId", machine)
+        self.assertEqual(machine["id"], "machine-a")
+        self.assertEqual(
+            sentinel_assets.remote_machine_sentinel_install_body.call_args.kwargs[
+                "training_source_root"
+            ],
+            "/opt/agora-source",
+        )
+
     def test_missing_sentinel_lifecycle_identity_is_optional_service_failure(
         self,
     ) -> None:
@@ -795,6 +847,11 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
             return real_run(command, *args, **kwargs)
 
         patchers = [
+            mock.patch.object(
+                boot_start,
+                "ACTIVE_ROOT_POINTER",
+                root.parent / "active-root.json",
+            ),
             mock.patch.object(bootstrap, "RUNTIME_DIR", ROOT / "machine-runtime"),
             mock.patch.object(bootstrap, "TRAINING_SOURCE", Path("/opt/agora-source")),
             mock.patch.object(bootstrap, "STAGING_ROOT", staging_root),
@@ -847,7 +904,10 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
             )
         with mock.patch.dict(
             os.environ,
-            {"ASSIGNMENT_PROC_ROOT": str(root.parent / "synthetic-proc")},
+            {
+                "ASSIGNMENT_PROC_ROOT": str(root.parent / "synthetic-proc"),
+                "AGORA_ACTIVE_ROOT_POINTER": str(root.parent / "active-root.json"),
+            },
         ):
             (root.parent / "synthetic-proc").mkdir(exist_ok=True)
             entered = []
@@ -910,6 +970,7 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
                 json.dumps(launch, sort_keys=True, separators=(",", ":")).encode()
             ).decode()
             status = Path(directory) / "boot-status.json"
+            pointer = Path(directory) / "var" / "lib" / "agora" / "active-root.json"
 
             def invoke(config, observed_token, *, persist):
                 self.assertTrue(persist)
@@ -925,6 +986,7 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
 
             with (
                 mock.patch.object(boot_start, "STATUS", status),
+                mock.patch.object(boot_start, "ACTIVE_ROOT_POINTER", pointer),
                 mock.patch.object(boot_start, "_verify_boot_capability"),
                 mock.patch.object(
                     boot_start,
@@ -1204,6 +1266,7 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
             )
             self.assertEqual(persisted, newer)
             self.assertEqual(failed_receipt["status"], "failed")
+            self.assertFalse((root / "boot-incomplete.json").exists())
 
     def test_postcommit_start_failure_keeps_target_and_exact_retry_finishes(
         self,
@@ -1227,8 +1290,14 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
             failed_receipt = json.loads(
                 (root / "bootstrap-receipt.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(failed_receipt["status"], "failed")
-            self.assertEqual(json.loads(first)["state"], "ready")
+            self.assertEqual(
+                failed_receipt["status"], "boot_incomplete_recoverable"
+            )
+            self.assertEqual(json.loads(first)["state"], "staged")
+            self.assertEqual(
+                json.loads((root / "training-intent.json").read_text())["desiredState"],
+                "paused",
+            )
 
             self.assertEqual(
                 self._invoke(
@@ -1242,9 +1311,11 @@ class FleetGeneratedBootstrapJointTests(unittest.TestCase):
             receipt = json.loads(
                 (root / "bootstrap-receipt.json").read_text(encoding="utf-8")
             )
-            self.assertEqual((root / "assignment.json").read_bytes(), first)
+            self.assertEqual(
+                json.loads((root / "assignment.json").read_text())["state"],
+                "ready",
+            )
             self.assertEqual(receipt["status"], "ready")
-            self.assertTrue(receipt["assignmentTransition"]["idempotent"])
             self.assertEqual(receipt["training"]["status"], "started")
 
     def test_rollback_lost_ack_replay_is_identical_and_idempotent(self) -> None:

@@ -40,13 +40,112 @@ def launch(token: str = "fixture-token") -> str:
 
 
 class BootStartTests(unittest.TestCase):
-    def test_no_opt_in_stays_manual(self) -> None:
+    def test_entrypoint_keeps_pid1_lock_but_closes_it_for_bootstrap_child(self) -> None:
+        entrypoint = (ROOT / "start.sh").read_text(encoding="utf-8")
+        self.assertIn("exec 9>/run/agora-image-start.lock", entrypoint)
+        self.assertIn("if ! flock -n 9; then", entrypoint)
+        self.assertRegex(
+            entrypoint,
+            r"trap - ERR\nset \+e\nenv \\\n"
+            r"(?:.*\\\n)+?"
+            r"\s+/opt/agora-venv/bin/python /opt/agora-image-runtime/agora_boot_start\.py \\\n"
+            r"\s+9>&- \\\n\s+>/var/log/agora-image-bootstrap\.log 2>&1\n"
+            r"bootstrap_rc=\$\?\nset -e\ntrap start_failure ERR",
+        )
+        self.assertIn("exec sleep infinity", entrypoint)
+
+    def test_active_root_pointer_is_private_idempotent_and_generation_fenced(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            pointer = base / "var" / "lib" / "agora" / "active-root.json"
+            config = {
+                "remoteRoot": str(base / "runtime"),
+                "machineId": "machine-a",
+                "provider": "runpod",
+                "accountScope": "runpod-1",
+                "providerResourceId": "pod-a",
+                "assignmentOperationId": "operation-a",
+                "assignmentGeneration": 1,
+            }
+            with mock.patch.object(boot, "ACTIVE_ROOT_POINTER", pointer):
+                boot._record_active_root(config)
+                first = pointer.read_bytes()
+                boot._record_active_root(config)
+                self.assertEqual(pointer.read_bytes(), first)
+                self.assertEqual(pointer.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(pointer.parent.stat().st_mode & 0o777, 0o700)
+
+                conflicting = {**config, "remoteRoot": str(base / "other")}
+                with self.assertRaisesRegex(boot.BootInputError, "conflicts"):
+                    boot._record_active_root(conflicting)
+
+                newer = {
+                    **conflicting,
+                    "assignmentOperationId": "operation-b",
+                    "assignmentGeneration": 2,
+                }
+                boot._record_active_root(newer)
+                self.assertEqual(
+                    json.loads(pointer.read_text())["remoteRoot"], str(base / "other")
+                )
+
+    def test_manual_restart_uses_pointer_and_never_guesses_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "runtime"
+            canonical = root / "controller-input"
+            canonical.mkdir(parents=True)
+            (canonical / "machine-config.json").write_text(
+                json.dumps(
+                    {
+                        "assignmentGeneration": 1,
+                        "assignmentOperationId": "operation-a",
+                        "remoteRoot": str(root),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (canonical / "machine-config.json").chmod(0o600)
+            (canonical / "hf-token").write_text("fixture-token", encoding="utf-8")
+            (canonical / "hf-token").chmod(0o600)
+            canonical.chmod(0o700)
+            pointer = base / "active-root.json"
+            pointer.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": "agora.active-runtime-root.v1",
+                        "remoteRoot": str(root),
+                        "assignmentGeneration": 1,
+                        "assignmentOperationId": "operation-a",
+                        "identitySha256": "a" * 64,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pointer.chmod(0o600)
+            pointer.parent.chmod(0o700)
+            status = base / "status.json"
+            with (
+                mock.patch.object(boot, "ACTIVE_ROOT_POINTER", pointer),
+                mock.patch.object(boot, "STATUS", status),
+                mock.patch.object(boot, "_restore_saved_observation", return_value=0),
+                mock.patch.object(boot, "_saved_selection", return_value="stopped"),
+                mock.patch.object(boot, "_root_identity_digest", return_value="a" * 64),
+            ):
+                self.assertEqual(boot.main({}), 0)
+            self.assertEqual(json.loads(status.read_text())["state"], "stopped")
+
+    def test_no_opt_in_without_pointer_waits_for_controller(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             status = Path(directory) / "status.json"
-            with mock.patch.object(boot, "STATUS", status):
+            pointer = Path(directory) / "active-root.json"
+            with (
+                mock.patch.object(boot, "STATUS", status),
+                mock.patch.object(boot, "ACTIVE_ROOT_POINTER", pointer),
+            ):
                 self.assertEqual(boot.main({}), 0)
             value = json.loads(status.read_text(encoding="utf-8"))
-        self.assertEqual(value["state"], "manual")
+        self.assertEqual(value["state"], "waiting_for_controller_config")
 
     def test_malformed_opt_in_is_nonfatal_and_secret_free(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -183,6 +282,12 @@ class BootStartTests(unittest.TestCase):
             self.assertEqual(
                 boot._saved_selection(
                     root, {"config": {"assignmentGeneration": 1}}
+                ),
+                "saved",
+            )
+            self.assertEqual(
+                boot._saved_selection(
+                    root, {"config": {"assignmentGeneration": 2}}
                 ),
                 "saved",
             )
