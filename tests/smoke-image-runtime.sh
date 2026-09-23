@@ -351,10 +351,11 @@ while True:
 PY
   (
     cd /opt/agora-source
-    /opt/agora-venv/bin/python "$server_path" > /tmp/image-smoke-orphan.log 2>&1 &
-    echo $! > "$root/orphan-owned-process.pid"
-  )
-  orphan_pid="$(cat "$root/orphan-owned-process.pid")"
+    exec /opt/agora-venv/bin/python "$server_path" \
+      > /tmp/image-smoke-orphan.log 2>&1
+  ) &
+  orphan_pid=$!
+  printf '%s\n' "$orphan_pid" > "$root/orphan-owned-process.pid"
   orphan_identity_ready() {
     /opt/agora-venv/bin/python - "$orphan_pid" "$server_path" <<'\''PY'\''
 import os
@@ -404,8 +405,10 @@ PY
   test "$orphan_bootstrap_rc" = 70
   grep -Fq "owned Agora process is still running" /tmp/image-smoke-orphan-bootstrap.log
   test "$(sha256sum "$root/assignment.json" | awk '\''{print $1}'\'')" = "$assignment_before"
-  kill "$orphan_pid"
-  wait "$orphan_pid" 2>/dev/null || true
+  kill -0 "$orphan_pid"
+  orphan_identity_ready
+  terminate_and_reap_child "configured orphan Agora server" "$orphan_pid"
+  assert_child_exited "configured orphan Agora server" "$orphan_pid"
   rm -f "$root/orphan-owned-process.pid" "$orphan_ready"
   /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
     > /tmp/image-smoke-orphan-retry.log 2>&1

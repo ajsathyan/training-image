@@ -71,6 +71,51 @@ if wait_for_children_success "replay failure with prior trainer" \
 fi
 tmux has-session -t agora_gpu
 
+# A live direct child is not ready merely because its PID exists, and the retry
+# gate must remain closed until bounded cleanup has reaped that exact child.
+lifecycle_gate="$work/lifecycle-gate"
+lifecycle_ready="$work/lifecycle-ready"
+mkfifo "$lifecycle_gate"
+(
+  read -r _ < "$lifecycle_gate"
+  printf '%s\n' ready > "$lifecycle_ready"
+  exec sleep 30
+) &
+lifecycle_pid=$!
+kill -0 "$lifecycle_pid"
+test ! -e "$lifecycle_ready"
+if assert_child_exited "pre-exec lifecycle control" "$lifecycle_pid" 2>/dev/null; then
+  printf '%s\n' 'retry gate accepted a live pre-exec child' >&2
+  exit 1
+fi
+printf '%s\n' continue > "$lifecycle_gate"
+for _ in $(seq 1 50); do
+  test -f "$lifecycle_ready" && break
+  sleep 0.01
+done
+test -f "$lifecycle_ready"
+if assert_child_exited "ready lifecycle control" "$lifecycle_pid" 2>/dev/null; then
+  printf '%s\n' 'retry gate accepted a live ready child' >&2
+  exit 1
+fi
+terminate_and_reap_child "lifecycle control" "$lifecycle_pid"
+assert_child_exited "lifecycle control" "$lifecycle_pid"
+
+stubborn_ready="$work/stubborn-ready"
+(
+  trap '' TERM
+  printf '%s\n' ready > "$stubborn_ready"
+  while :; do sleep 1; done
+) &
+stubborn_pid=$!
+for _ in $(seq 1 50); do
+  test -f "$stubborn_ready" && break
+  sleep 0.01
+done
+test -f "$stubborn_ready"
+terminate_and_reap_child "TERM-resistant lifecycle control" "$stubborn_pid"
+assert_child_exited "TERM-resistant lifecycle control" "$stubborn_pid"
+
 FAKE_TMUX_STATUS=1
 export FAKE_TMUX_STATUS
 assert_no_tmux_session "legitimate absent session" agora_gpu

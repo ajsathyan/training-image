@@ -50,6 +50,64 @@ wait_for_children_success() {
   fi
 }
 
+assert_child_exited() {
+  local label="$1"
+  local pid="$2"
+  if kill -0 "$pid" 2>/dev/null; then
+    printf 'child still running before retry: %s (pid %s)\n' "$label" "$pid" >&2
+    return 1
+  fi
+}
+
+terminate_and_reap_child() {
+  local label="$1"
+  local pid="$2"
+  local child_status=0 watchdog_status=0 watchdog_pid
+
+  if ! kill -TERM "$pid" 2>/dev/null; then
+    printf 'could not terminate child: %s (pid %s)\n' "$label" "$pid" >&2
+    return 1
+  fi
+  (
+    sleep 2
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || ! kill -0 "$pid" 2>/dev/null
+    fi
+  ) &
+  watchdog_pid=$!
+
+  if wait "$pid" 2>/dev/null; then
+    child_status=0
+  else
+    child_status=$?
+  fi
+  if kill -0 "$watchdog_pid" 2>/dev/null; then
+    kill -TERM "$watchdog_pid" 2>/dev/null || true
+  fi
+  if wait "$watchdog_pid" 2>/dev/null; then
+    watchdog_status=0
+  else
+    watchdog_status=$?
+  fi
+  case "$watchdog_status" in
+    0|143) ;;
+    *)
+      printf 'child cleanup watchdog failed: %s (status %s)\n' \
+        "$label" "$watchdog_status" >&2
+      return "$watchdog_status"
+      ;;
+  esac
+  case "$child_status" in
+    137|143) ;;
+    *)
+      printf 'child did not exit from bounded cleanup: %s (status %s)\n' \
+        "$label" "$child_status" >&2
+      return 1
+      ;;
+  esac
+  assert_child_exited "$label" "$pid"
+}
+
 assert_absent_status() {
   local label="$1"
   shift
