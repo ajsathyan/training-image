@@ -18,9 +18,9 @@ its immediate rollback is
 
 - upstream image: `ghcr.io/pluralisresearch/agora-test@sha256:da54b2e3e37b90f9f62d9a04546a95e3bd4711fb4641bd61c13e3db8561a1326`
 - Agora training source: `PluralisResearch/agora-test@71a44b894100baa8f2996b97e73ae0bd67fa6b9d`
-- fleet runtime: `ajsathyan/agora-runpod@9e30750ba8aa3122238da5d4f448f59d493e6563`
-- fleet source tree: `406228725ea83cc2b7aac9e7c2080b2224f69ef3`
-- runtime export: `92c0e65ab5a6fde2f4899cd174a66bbbb7b1d9488092ae9ee5ff1b6eef4e75f7`
+- fleet runtime: `ajsathyan/agora-runpod@6321d9423b8f2ed99c0d6947595cc6a6bfcde925`
+- fleet source tree: `269c215f3cc48c5cb84a09ddb02768c4f34a7b1d`
+- runtime export: `e2c14a9aea8b124523885a22592404dab5ea75f6603b7124a69596f67135f488`
 - px0: `v0.1.6`, verified by the SHA-256 in `Dockerfile`
 - in-place repair build tooling: exact wheel hashes in
   `image-repair-build-requirements.txt`
@@ -93,9 +93,10 @@ modes before it persists a secret or starts training. The canonical active-root
 pointer binds machine and assignment generation; manual restart without an active
 pointer waits for controller configuration instead of guessing a default root.
 New managed launches use `/var/lib/agora-runtime`; an explicit legacy config keeps
-its recorded root. This location is provider container-disk state, not a backup:
-it may survive a restart when the disk is retained, but deletion or replacement
-can discard it.
+its recorded root. Explicit normalized private alternatives are accepted when the
+host preflight can enforce those controls. Runtime-root retention depends on the
+provider and selected storage lifecycle, so it is not a backup and must not be
+assumed to survive restart, deletion, or replacement.
 
 A strict `prepared` receipt is durable before training starts. If a later required
 step fails, bootstrap stops only its exact owned `agora_gpu` session and records
@@ -183,7 +184,7 @@ Use a fleet clone containing the reviewed exact commit:
 ```bash
 python3 tools/export_fleet_runtime.py \
   --source-repo /absolute/path/to/agora-runpod \
-  --source-commit 9e30750ba8aa3122238da5d4f448f59d493e6563 \
+  --source-commit 6321d9423b8f2ed99c0d6947595cc6a6bfcde925 \
   --output-dir machine-runtime
 python3 -m unittest tests.test_runtime_export -v
 ```

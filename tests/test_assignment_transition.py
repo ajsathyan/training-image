@@ -165,6 +165,25 @@ class AssignmentTransitionTests(unittest.TestCase):
                 ):
                     transition.preflight_private_root(root)
 
+    def test_workspace_named_root_is_decided_by_real_mode_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace" / "agora-run"
+            transition.preflight_private_root(root)
+            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace" / "agora-run"
+            with mock.patch.object(
+                transition.os,
+                "chmod",
+                side_effect=OSError("provider filesystem refused private mode"),
+            ):
+                with self.assertRaisesRegex(
+                    transition.AssignmentTransitionError, "cannot enforce mode"
+                ):
+                    transition.preflight_private_root(root)
+            self.assertFalse((root / "assignment.json").exists())
+
     def test_stage_ready_and_same_binding_replay_are_exact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
