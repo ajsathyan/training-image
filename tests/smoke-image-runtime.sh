@@ -36,6 +36,7 @@ capture_failure() {
     > "$destination/$name/container.log" || true
   docker exec "$name" sh -c '
     for path in /run/agora-image-bootstrap.status /run/agora-image-bootstrap.status.json \
+      /var/lib/agora-runtime/bootstrap-receipt.json \
       /workspace/agora-run/bootstrap-receipt.json; do
       if test -f "$path"; then printf "== %s ==\n" "$path"; cat "$path"; fi
     done
@@ -338,28 +339,71 @@ PY
   # when no tmux session represents it. The source file is restored before any
   # repair check, and the fixture makes no network or GPU request.
   server_path=/opt/agora-source/agora/src/agora/run_server.py
+  orphan_ready=/tmp/image-smoke-orphan-ready
+  rm -f "$orphan_ready"
   cp -p "$server_path" /tmp/run_server.py.image-smoke-backup
   cat > "$server_path" <<'\''PY'\''
+import pathlib
 import time
+
+pathlib.Path("/tmp/image-smoke-orphan-ready").write_text("ready\n", encoding="utf-8")
 while True:
     time.sleep(1)
 PY
   (
     cd /opt/agora-source
-    /opt/agora-venv/bin/python "$server_path" > /tmp/image-smoke-orphan.log 2>&1 &
-    echo $! > "$root/orphan-owned-process.pid"
-  )
-  orphan_pid="$(cat "$root/orphan-owned-process.pid")"
-  for _ in $(seq 1 20); do
-    if kill -0 "$orphan_pid" 2>/dev/null; then break; fi
+    exec /opt/agora-venv/bin/python "$server_path" \
+      > /tmp/image-smoke-orphan.log 2>&1
+  ) &
+  orphan_pid=$!
+  printf '%s\n' "$orphan_pid" > "$root/orphan-owned-process.pid"
+  orphan_identity_ready() {
+    /opt/agora-venv/bin/python - "$orphan_pid" "$server_path" <<'\''PY'\''
+import os
+import pathlib
+import sys
+
+pid, expected_script = sys.argv[1:]
+proc = pathlib.Path("/proc") / pid
+try:
+    argv = (proc / "cmdline").read_bytes().split(b"\0")
+    cwd = os.readlink(proc / "cwd")
+    state = (proc / "stat").read_text(encoding="utf-8").rsplit(") ", 1)[1].split()[0]
+except (OSError, IndexError):
+    raise SystemExit(1)
+argv = [value.decode("utf-8", errors="surrogateescape") for value in argv if value]
+raise SystemExit(
+    0
+    if len(argv) >= 2
+    and argv[0] == "/opt/agora-venv/bin/python"
+    and argv[1] == expected_script
+    and cwd == "/opt/agora-source"
+    and state != "Z"
+    else 1
+)
+PY
+  }
+  for _ in $(seq 1 50); do
+    if kill -0 "$orphan_pid" 2>/dev/null \
+      && test -f "$orphan_ready" \
+      && orphan_identity_ready; then
+      break
+    fi
     sleep 0.1
   done
   kill -0 "$orphan_pid"
+  test -f "$orphan_ready"
+  orphan_identity_ready
   mv /tmp/run_server.py.image-smoke-backup "$server_path"
+  configured_bootstrap() {
+    /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
+      --config "$root/controller-input/machine-config.json" \
+      --token-file "$root/controller-input/hf-token" \
+      --receipt "$root/bootstrap-receipt.json"
+  }
   assignment_before="$(sha256sum "$root/assignment.json" | awk '\''{print $1}'\'')"
   orphan_bootstrap_rc=0
-  if /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
-    > /tmp/image-smoke-orphan-bootstrap.log 2>&1; then
+  if configured_bootstrap > /tmp/image-smoke-orphan-bootstrap.log 2>&1; then
     :
   else
     orphan_bootstrap_rc=$?
@@ -367,11 +411,12 @@ PY
   test "$orphan_bootstrap_rc" = 70
   grep -Fq "owned Agora process is still running" /tmp/image-smoke-orphan-bootstrap.log
   test "$(sha256sum "$root/assignment.json" | awk '\''{print $1}'\'')" = "$assignment_before"
-  kill "$orphan_pid"
-  wait "$orphan_pid" 2>/dev/null || true
-  rm -f "$root/orphan-owned-process.pid"
-  /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
-    > /tmp/image-smoke-orphan-retry.log 2>&1
+  kill -0 "$orphan_pid"
+  orphan_identity_ready
+  terminate_and_reap_child "configured orphan Agora server" "$orphan_pid"
+  assert_child_exited "configured orphan Agora server" "$orphan_pid"
+  rm -f "$root/orphan-owned-process.pid" "$orphan_ready"
+  configured_bootstrap > /tmp/image-smoke-orphan-retry.log 2>&1
   jq -e '\''.status == "ready" and .assignmentTransition.state == "staged"'\'' \
     "$root/bootstrap-receipt.json" >/dev/null
 '
@@ -398,8 +443,7 @@ docker exec "$configured" sh -c \
   'chmod 600 /workspace/agora-run/.assignment.newer.json && mv /workspace/agora-run/.assignment.newer.json /workspace/agora-run/assignment.json'
 newer_fence_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/assignment.json | awk '{print $1}')"
 set +e
-docker exec "$configured" /opt/agora-venv/bin/python \
-  /opt/agora-image-runtime/agora_image_bootstrap.py \
+run_docker_image_bootstrap_for_root "$configured" /workspace/agora-run \
   > "$work/image-smoke-stale-stage.log" 2>&1
 stale_stage_rc=$?
 set -e
@@ -421,8 +465,7 @@ docker cp "$work/configured-rollback-config.json" \
   "$configured:/workspace/agora-run/controller-input/.machine-config.rollback"
 docker exec "$configured" sh -c \
   'chmod 600 /workspace/agora-run/controller-input/.machine-config.rollback && mv /workspace/agora-run/controller-input/.machine-config.rollback /workspace/agora-run/controller-input/machine-config.json'
-docker exec "$configured" /opt/agora-venv/bin/python \
-  /opt/agora-image-runtime/agora_image_bootstrap.py \
+run_docker_image_bootstrap_for_root "$configured" /workspace/agora-run \
   > "$work/image-smoke-rollback.log" 2>&1
 rollback_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/assignment.json | awk '{print $1}')"
 docker exec "$configured" jq -e '.status == "ready" and
@@ -431,8 +474,7 @@ docker exec "$configured" jq -e '.status == "ready" and
   .assignmentTransition.rollbackAuthorized == true' \
   /workspace/agora-run/bootstrap-receipt.json >/dev/null
 docker exec "$configured" rm /workspace/agora-run/bootstrap-receipt.json
-docker exec "$configured" /opt/agora-venv/bin/python \
-  /opt/agora-image-runtime/agora_image_bootstrap.py \
+run_docker_image_bootstrap_for_root "$configured" /workspace/agora-run \
   > "$work/image-smoke-rollback-replay.log" 2>&1
 test "$(docker exec "$configured" sha256sum /workspace/agora-run/assignment.json | awk '{print $1}')" = "$rollback_hash"
 docker exec "$configured" jq -e '.status == "ready" and
@@ -443,8 +485,7 @@ docker cp "$work/configured-stage-config.json" \
   "$configured:/workspace/agora-run/controller-input/.machine-config.stage"
 docker exec "$configured" sh -c \
   'chmod 600 /workspace/agora-run/controller-input/.machine-config.stage && mv /workspace/agora-run/controller-input/.machine-config.stage /workspace/agora-run/controller-input/machine-config.json'
-docker exec "$configured" /opt/agora-venv/bin/python \
-  /opt/agora-image-runtime/agora_image_bootstrap.py \
+run_docker_image_bootstrap_for_root "$configured" /workspace/agora-run \
   > "$work/image-smoke-restage.log" 2>&1
 docker exec "$configured" jq -e \
   '.status == "ready" and .assignmentTransition.state == "staged"' \
@@ -606,8 +647,11 @@ import signal
 import time
 from pathlib import Path
 
-counter = Path("/workspace/agora-run/fake-launch-count")
-identity = Path("/workspace/agora-run/private_gpu0.key")
+root = Path("/var/lib/agora-runtime")
+if not root.exists():
+    root = Path("/workspace/agora-run")
+counter = root / "fake-launch-count"
+identity = root / "private_gpu0.key"
 if not identity.exists():
     identity.write_text("offline-fixture-private-identity\n", encoding="utf-8")
     identity.chmod(0o600)
@@ -626,6 +670,89 @@ while not stop:
     time.sleep(0.2)
 PY
 chmod 644 "$work/fake-agora-cli.py"
+
+# Exercise the image entrypoint timing with docker-exec environment staging: the
+# image first starts neutral and keeps SSH alive, then a one-shot /start.sh runs
+# in the same container. This does not prove Vast API environment injection.
+# Concurrent replays must serialize without another trainer or immortal helper.
+delayed_token="hf_fixture_delayed_vast_token_789"
+delayed_token_hash="$(printf '%s' "$delayed_token" | sha256sum | awk '{print $1}')"
+jq -n \
+  --arg runtime_fingerprint "$declared_runtime_fingerprint" \
+  '{
+    id:"machine-delayed-vast-smoke", provider:"vast", accountScope:"vast-smoke",
+    providerResourceId:"880001", tokenLabel:"delayed-vast-user", tokenInstance:1,
+    assignmentGeneration:1, assignmentOperationId:"assignment-operation-delayed-vast",
+    runId:"run-delayed-vast", gpuModel:"NVIDIA RTX 4090", agoraJoinRole:"tail",
+    provisioningOrigin:"vast_boot", hostPort:49200, announcePort:55123,
+    remoteRoot:"/var/lib/agora-runtime", px0Enabled:false,
+    imageCapability:{contractVersion:"agora.machine-image-capability.v1",runtimeArtifactFingerprint:$runtime_fingerprint}
+  }' > "$work/delayed-vast-machine.json"
+python3 "$REPO_ROOT/tests/generate_machine_image_config.py" config \
+  --machine "$work/delayed-vast-machine.json" \
+  --token-sha256 "$delayed_token_hash" \
+  --output "$work/delayed-vast-config.json" \
+  --start-training --transition-kind ready --allow-absent
+delayed_vast_launch_b64="$(python3 - "$work/delayed-vast-config.json" "$delayed_token_hash" <<'PY'
+import base64,json,sys
+config=json.load(open(sys.argv[1],encoding="utf-8"))
+config.pop("providerResourceId",None)
+config.pop("announcePort",None)
+value={"schemaVersion":"agora.machine-boot-launch.v1","tokenSha256":sys.argv[2],"config":config}
+print(base64.b64encode(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).decode())
+PY
+)"
+docker cp "$work/fake-agora-cli.py" "$neutral:/opt/agora-source/agora_cli.py"
+docker exec \
+  -e AGORA_IMAGE_START_ONESHOT=1 \
+  -e AGORA_BOOT_AUTOSTART=1 \
+  -e AGORA_BOOT_LAUNCH_B64="$delayed_vast_launch_b64" \
+  -e AGORA_BOOT_HF_TOKEN="$delayed_token" \
+  -e CONTAINER_ID=880001 \
+  -e VAST_TCP_PORT_49200=55123 \
+  "$neutral" /start.sh
+docker exec "$neutral" jq -e \
+  '.state == "ready" and .selection == "launch"' \
+  /run/agora-image-bootstrap.status.json >/dev/null
+docker exec "$neutral" jq -e \
+  '.status == "ready" and .provider == "vast" and .providerResourceId == "880001"' \
+  /var/lib/agora-runtime/bootstrap-receipt.json >/dev/null
+test "$(docker exec "$neutral" tmux list-sessions -F '#{session_name}' | grep -xc agora_gpu)" = 1
+test "$(docker exec "$neutral" sh -c 'ps -eo args= | grep -Fxc "sleep infinity"')" = 1
+wait_for_ssh "$neutral_port"
+delayed_replay_pids=()
+for replay in 1 2; do
+  timeout -k 5s 120s docker exec \
+    -e AGORA_IMAGE_START_ONESHOT=1 \
+    -e AGORA_BOOT_AUTOSTART=1 \
+    -e AGORA_BOOT_LAUNCH_B64="$delayed_vast_launch_b64" \
+    -e AGORA_BOOT_HF_TOKEN="$delayed_token" \
+    -e CONTAINER_ID=880001 \
+    -e VAST_TCP_PORT_49200=55123 \
+    "$neutral" /start.sh >"$work/delayed-replay-$replay.log" 2>&1 &
+  delayed_replay_pids+=("$!")
+done
+wait_for_children_success \
+  "delayed Vast concurrent replay" "${delayed_replay_pids[@]}"
+docker exec "$neutral" jq -e \
+  '.state == "ready" and .selection == "saved"' \
+  /run/agora-image-bootstrap.status.json >/dev/null
+docker exec "$neutral" jq -e \
+  '.status == "ready" and
+   .provider == "vast" and
+   .providerResourceId == "880001" and
+   .assignmentOperationId == "assignment-operation-delayed-vast" and
+   .assignmentGeneration == 1 and
+   .assignmentTransition.idempotent == true' \
+  /var/lib/agora-runtime/bootstrap-receipt.json >/dev/null
+test "$(docker exec "$neutral" tmux list-sessions -F '#{session_name}' | grep -xc agora_gpu)" = 1
+test "$(docker exec "$neutral" sh -c 'ps -eo args= | grep -Fxc "sleep infinity"')" = 1
+test "$(docker exec "$neutral" stat -c %a /var/lib/agora-runtime)" = 700
+test "$(docker exec "$neutral" stat -c %a /var/lib/agora-runtime/controller-input/machine-config.json)" = 600
+assert_output_lacks_fixed_text "delayed Vast logs exclude HF token" \
+  "$delayed_token" docker logs "$neutral"
+assert_docker_file_lacks_fixed_text "delayed Vast sshd environment excludes HF token" \
+  "$neutral" "$delayed_token" "/proc/$(docker exec "$neutral" pgrep -xo sshd)/environ"
 
 docker run -d --name "$training" \
   -e PUBLIC_KEY="$(cat "$work/id_ed25519.pub")" \
@@ -718,8 +845,7 @@ docker cp "$work/training-stage-config.json" \
   "$training:/workspace/agora-run/controller-input/.machine-config.stage"
 docker exec "$training" sh -c \
   'chmod 600 /workspace/agora-run/controller-input/.machine-config.stage && mv /workspace/agora-run/controller-input/.machine-config.stage /workspace/agora-run/controller-input/machine-config.json'
-docker exec "$training" /opt/agora-venv/bin/python \
-  /opt/agora-image-runtime/agora_image_bootstrap.py \
+run_docker_image_bootstrap_for_root "$training" /workspace/agora-run \
   > "$work/image-smoke-ready-stage-replay.log" 2>&1
 docker exec "$training" jq -e '.status == "ready" and
   .assignmentTransition.kind == "stage" and

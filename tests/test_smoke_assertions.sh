@@ -20,11 +20,160 @@ exit "${FAKE_SS_STATUS:-0}"
 SH
 cat > "$work/bin/docker" <<'SH'
 #!/usr/bin/env bash
+if [ "${FAKE_DOCKER_MODE-}" = bootstrap ]; then
+  printf '%s\n' "$@" > "${FAKE_DOCKER_ARGV_FILE:?}"
+  expected_root="${FAKE_DOCKER_EXPECT_ROOT:?}"
+  expected_container="${FAKE_DOCKER_EXPECT_CONTAINER:?}"
+  if [ "$#" -ne 10 ] \
+    || [ "$1" != exec ] \
+    || [ "$2" != "$expected_container" ] \
+    || [ "$3" != /opt/agora-venv/bin/python ] \
+    || [ "$4" != /opt/agora-image-runtime/agora_image_bootstrap.py ] \
+    || [ "$5" != --config ] \
+    || [ "$6" != "$expected_root/controller-input/machine-config.json" ] \
+    || [ "$7" != --token-file ] \
+    || [ "$8" != "$expected_root/controller-input/hf-token" ] \
+    || [ "$9" != --receipt ] \
+    || [ "${10}" != "$expected_root/bootstrap-receipt.json" ]; then
+    exit 64
+  fi
+  exit 0
+fi
 exit "${FAKE_DOCKER_STATUS:?}"
 SH
 chmod +x "$work/bin/tmux" "$work/bin/ss" "$work/bin/docker"
 PATH="$work/bin:$PATH"
 export PATH
+
+# Exercise the exact helper used by each configured/training direct bootstrap.
+# The fake consumer accepts only a single internally consistent root and records
+# the argv so missing, mismatched, or reordered paths cannot pass this control.
+FAKE_DOCKER_MODE=bootstrap
+FAKE_DOCKER_EXPECT_ROOT=/workspace/agora-run
+FAKE_DOCKER_EXPECT_CONTAINER=fixture
+FAKE_DOCKER_ARGV_FILE="$work/bootstrap-argv"
+export FAKE_DOCKER_MODE FAKE_DOCKER_EXPECT_ROOT FAKE_DOCKER_EXPECT_CONTAINER
+export FAKE_DOCKER_ARGV_FILE
+run_docker_image_bootstrap_for_root fixture /workspace/agora-run
+cat > "$work/bootstrap-argv.expected" <<'EOF'
+exec
+fixture
+/opt/agora-venv/bin/python
+/opt/agora-image-runtime/agora_image_bootstrap.py
+--config
+/workspace/agora-run/controller-input/machine-config.json
+--token-file
+/workspace/agora-run/controller-input/hf-token
+--receipt
+/workspace/agora-run/bootstrap-receipt.json
+EOF
+diff -u "$work/bootstrap-argv.expected" "$work/bootstrap-argv"
+if run_docker_image_bootstrap_for_root fixture /workspace/wrong-root \
+  2>/dev/null; then
+  printf '%s\n' 'bootstrap helper accepted paths for the wrong runtime root' >&2
+  exit 1
+fi
+if run_docker_image_bootstrap_for_root fixture 2>/dev/null; then
+  printf '%s\n' 'bootstrap helper accepted a missing runtime root' >&2
+  exit 1
+fi
+unset FAKE_DOCKER_MODE FAKE_DOCKER_EXPECT_ROOT FAKE_DOCKER_EXPECT_CONTAINER
+unset FAKE_DOCKER_ARGV_FILE
+
+(exit 0) &
+success_one=$!
+(exit 0) &
+success_two=$!
+wait_for_children_success "two successful replay children" \
+  "$success_one" "$success_two"
+
+(exit 75) &
+failed_first=$!
+(sleep 30) &
+cancelled_second=$!
+if wait_for_children_success "first replay child failure" \
+  "$failed_first" "$cancelled_second" 2>/dev/null; then
+  printf '%s\n' 'first replay child failure was accepted' >&2
+  exit 1
+fi
+if kill -0 "$cancelled_second" 2>/dev/null; then
+  printf '%s\n' 'sibling replay child leaked after first failure' >&2
+  exit 1
+fi
+
+(exit 0) &
+successful_first=$!
+(exit 75) &
+failed_second=$!
+if wait_for_children_success "second replay child failure" \
+  "$successful_first" "$failed_second" 2>/dev/null; then
+  printf '%s\n' 'second replay child failure was accepted' >&2
+  exit 1
+fi
+
+FAKE_TMUX_STATUS=0
+export FAKE_TMUX_STATUS
+(exit 75) &
+masked_failure_one=$!
+(exit 75) &
+masked_failure_two=$!
+if wait_for_children_success "replay failure with prior trainer" \
+  "$masked_failure_one" "$masked_failure_two" 2>/dev/null \
+  && tmux has-session -t agora_gpu; then
+  printf '%s\n' 'prior trainer state masked replay child failure' >&2
+  exit 1
+fi
+tmux has-session -t agora_gpu
+
+# A live direct child is not ready merely because its PID exists, and the retry
+# gate must remain closed until bounded cleanup has reaped that exact child.
+lifecycle_gate="$work/lifecycle-gate"
+lifecycle_ready="$work/lifecycle-ready"
+mkfifo "$lifecycle_gate"
+(
+  read -r _ < "$lifecycle_gate"
+  printf '%s\n' ready > "$lifecycle_ready"
+  exec sleep 30
+) &
+lifecycle_pid=$!
+kill -0 "$lifecycle_pid"
+test ! -e "$lifecycle_ready"
+if assert_child_exited "pre-exec lifecycle control" "$lifecycle_pid" 2>/dev/null; then
+  printf '%s\n' 'retry gate accepted a live pre-exec child' >&2
+  exit 1
+fi
+printf '%s\n' continue > "$lifecycle_gate"
+for _ in $(seq 1 50); do
+  test -f "$lifecycle_ready" && break
+  sleep 0.01
+done
+test -f "$lifecycle_ready"
+if assert_child_exited "ready lifecycle control" "$lifecycle_pid" 2>/dev/null; then
+  printf '%s\n' 'retry gate accepted a live ready child' >&2
+  exit 1
+fi
+terminate_and_reap_child "lifecycle control" "$lifecycle_pid"
+assert_child_exited "lifecycle control" "$lifecycle_pid"
+
+stubborn_ready="$work/stubborn-ready"
+python3 - "$stubborn_ready" <<'PY' &
+import pathlib
+import signal
+import sys
+import time
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path(sys.argv[1]).write_text("ready\n", encoding="utf-8")
+time.sleep(30)
+PY
+stubborn_pid=$!
+for _ in $(seq 1 50); do
+  test -f "$stubborn_ready" && break
+  sleep 0.01
+done
+test -f "$stubborn_ready"
+terminate_and_reap_child "TERM-resistant lifecycle control" "$stubborn_pid"
+assert_child_exited "TERM-resistant lifecycle control" "$stubborn_pid"
 
 FAKE_TMUX_STATUS=1
 export FAKE_TMUX_STATUS

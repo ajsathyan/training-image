@@ -83,7 +83,7 @@ capability = {
     "inspection": {"path": "/opt/agora-image-runtime/refresh_inspection.py", "sha256": digest("refresh_inspection.py"), "root": "/run/agora-inspection", "bindHost": "127.0.0.1", "port": 7777, "public": False},
     "px0": {"path": "/usr/local/bin/px0", "version": "0.1.6", "sha256": "d4f2378a1d6fbda9960cc7da45a5e3b5a5f9f6b331be80bcbb8a27f9dc5e9e0c"},
     "heartbeat": {"path": "/opt/agora-image-runtime/agora_heartbeat_agent.py", "sha256": digest("agora_heartbeat_agent.py")},
-    "paths": {"remoteRoot": "/workspace/agora-run", "config": "/workspace/agora-run/controller-input/machine-config.json", "hfToken": "/workspace/agora-run/controller-input/hf-token", "receipt": "/workspace/agora-run/bootstrap-receipt.json"},
+    "paths": {"remoteRoot": "/var/lib/agora-runtime", "config": "/var/lib/agora-runtime/controller-input/machine-config.json", "hfToken": "/var/lib/agora-runtime/controller-input/hf-token", "receipt": "/var/lib/agora-runtime/bootstrap-receipt.json"},
     "fleetSource": manifest["source"],
     "runtimeExport": {"artifactFingerprint": fingerprint, "manifestSha256": hashlib.sha256(manifest_bytes).hexdigest()},
     "trainingSource": {"repository": "fixture://minimal-agora-source", "commit": commit},

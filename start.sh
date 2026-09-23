@@ -5,8 +5,10 @@ boot_autostart="${AGORA_BOOT_AUTOSTART:-}"
 boot_launch_b64="${AGORA_BOOT_LAUNCH_B64:-}"
 boot_hf_token="${AGORA_BOOT_HF_TOKEN:-}"
 boot_metadata_wait_seconds="${AGORA_BOOT_METADATA_WAIT_SECONDS:-}"
+image_start_oneshot="${AGORA_IMAGE_START_ONESHOT:-}"
 unset HF_TOKEN AGORA_BOOT_HF_TOKEN AGORA_BOOT_LAUNCH_B64 \
-    AGORA_SENTINEL_BOOTSTRAP_TOKEN AGORA_SENTINEL_MACHINE_TOKEN
+    AGORA_IMAGE_START_ONESHOT AGORA_SENTINEL_BOOTSTRAP_TOKEN \
+    AGORA_SENTINEL_MACHINE_TOKEN
 
 vast_start_log=/var/log/agora-vast-onstart.log
 log_start_stage() {
@@ -77,8 +79,9 @@ if ! grep -qF 'source /etc/agora_environment' /root/.bashrc; then
 fi
 
 exec 9>/run/agora-image-start.lock
-if ! flock -n 9; then
-    exit 0
+if ! flock -w 120 9; then
+    log_start_stage bootstrap_lock_timeout 75
+    exit 75
 fi
 
 rm -f /run/agora-image-bootstrap.status /run/agora-image-bootstrap.status.json
@@ -98,7 +101,17 @@ trap start_failure ERR
 printf '%s\n' "$bootstrap_rc" > /run/agora-image-bootstrap.status
 log_start_stage bootstrap_complete "$bootstrap_rc"
 
+# The lock serializes one bootstrap attempt, not the container lifetime. Vast
+# onstart and RunPod wrapper invocations are helpers and must be able to run
+# after the neutral PID1 attempt completes.
+flock -u 9
+exec 9>&-
+
 unset boot_autostart boot_launch_b64 boot_hf_token boot_metadata_wait_seconds configured_public_key
 trap - ERR
 
+if [[ "$image_start_oneshot" == "1" || "$$" -ne 1 ]]; then
+    exit "$bootstrap_rc"
+fi
+unset image_start_oneshot
 exec sleep infinity

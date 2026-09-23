@@ -39,7 +39,7 @@ RUNTIME_DIR = Path(
 )
 TRAINING_SOURCE = Path(os.environ.get("AGORA_TRAINING_SOURCE_DIR", "/opt/agora-source"))
 PYTHON_BIN = Path(os.environ.get("AGORA_PYTHON_BIN", "/opt/agora-venv/bin/python"))
-DEFAULT_REMOTE_ROOT = "/workspace/agora-run"
+DEFAULT_REMOTE_ROOT = "/var/lib/agora-runtime"
 DEFAULT_CONFIG_PATH = f"{DEFAULT_REMOTE_ROOT}/controller-input/machine-config.json"
 DEFAULT_TOKEN_PATH = f"{DEFAULT_REMOTE_ROOT}/controller-input/hf-token"
 DEFAULT_RECEIPT_PATH = f"{DEFAULT_REMOTE_ROOT}/bootstrap-receipt.json"

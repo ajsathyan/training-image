@@ -4,6 +4,133 @@
 # proof only when the inspection command succeeds and the forbidden value is
 # absent; inspection errors must fail instead of being mistaken for absence.
 
+wait_for_children_success() {
+  local label="$1"
+  shift
+  local pids=("$@")
+  local first_failure=0
+  local pid other status attempt
+
+  if [ "${#pids[@]}" -eq 0 ]; then
+    printf 'no child processes supplied: %s\n' "$label" >&2
+    return 2
+  fi
+
+  for pid in "${pids[@]}"; do
+    if wait "$pid"; then
+      status=0
+    else
+      status=$?
+    fi
+    if [ "$status" -eq 0 ]; then
+      continue
+    fi
+    if [ "$first_failure" -eq 0 ]; then
+      first_failure="$status"
+      printf 'required child failed: %s (pid %s, status %s)\n' \
+        "$label" "$pid" "$status" >&2
+      for other in "${pids[@]}"; do
+        if [ "$other" = "$pid" ] || ! kill -0 "$other" 2>/dev/null; then
+          continue
+        fi
+        kill -TERM "$other" 2>/dev/null || true
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          kill -0 "$other" 2>/dev/null || break
+          sleep 0.05
+        done
+        if kill -0 "$other" 2>/dev/null; then
+          kill -KILL "$other" 2>/dev/null || true
+        fi
+      done
+    fi
+  done
+
+  if [ "$first_failure" -ne 0 ]; then
+    return "$first_failure"
+  fi
+}
+
+assert_child_exited() {
+  local label="$1"
+  local pid="$2"
+  if kill -0 "$pid" 2>/dev/null; then
+    printf 'child still running before retry: %s (pid %s)\n' "$label" "$pid" >&2
+    return 1
+  fi
+}
+
+terminate_and_reap_child() {
+  local label="$1"
+  local pid="$2"
+  local child_status=0 watchdog_status=0 watchdog_pid
+
+  if ! kill -TERM "$pid" 2>/dev/null; then
+    printf 'could not terminate child: %s (pid %s)\n' "$label" "$pid" >&2
+    return 1
+  fi
+  (
+    sleep 2
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || ! kill -0 "$pid" 2>/dev/null
+    fi
+  ) &
+  watchdog_pid=$!
+
+  if wait "$pid" 2>/dev/null; then
+    child_status=0
+  else
+    child_status=$?
+  fi
+  if kill -0 "$watchdog_pid" 2>/dev/null; then
+    kill -TERM "$watchdog_pid" 2>/dev/null || true
+  fi
+  if wait "$watchdog_pid" 2>/dev/null; then
+    watchdog_status=0
+  else
+    watchdog_status=$?
+  fi
+  case "$watchdog_status" in
+    0|143) ;;
+    *)
+      printf 'child cleanup watchdog failed: %s (status %s)\n' \
+        "$label" "$watchdog_status" >&2
+      return "$watchdog_status"
+      ;;
+  esac
+  case "$child_status" in
+    137|143) ;;
+    *)
+      printf 'child did not exit from bounded cleanup: %s (status %s)\n' \
+        "$label" "$child_status" >&2
+      return 1
+      ;;
+  esac
+  assert_child_exited "$label" "$pid"
+}
+
+run_docker_image_bootstrap_for_root() {
+  if [ "$#" -ne 2 ]; then
+    printf '%s\n' \
+      'run_docker_image_bootstrap_for_root requires a container and runtime root' \
+      >&2
+    return 2
+  fi
+  local container="$1"
+  local root="$2"
+  case "$root" in
+    /*) ;;
+    *)
+      printf 'runtime root must be absolute: %s\n' "$root" >&2
+      return 2
+      ;;
+  esac
+  docker exec "$container" /opt/agora-venv/bin/python \
+    /opt/agora-image-runtime/agora_image_bootstrap.py \
+    --config "$root/controller-input/machine-config.json" \
+    --token-file "$root/controller-input/hf-token" \
+    --receipt "$root/bootstrap-receipt.json"
+}
+
 assert_absent_status() {
   local label="$1"
   shift

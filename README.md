@@ -18,9 +18,9 @@ its immediate rollback is
 
 - upstream image: `ghcr.io/pluralisresearch/agora-test@sha256:da54b2e3e37b90f9f62d9a04546a95e3bd4711fb4641bd61c13e3db8561a1326`
 - Agora training source: `PluralisResearch/agora-test@71a44b894100baa8f2996b97e73ae0bd67fa6b9d`
-- fleet runtime: `ajsathyan/agora-runpod@5c2000b4bb107a6102d72e9664c8bf65c9bdc18f`
-- fleet source tree: `ad7385d3ca1462604eac214a0af8cc30cfdda204`
-- runtime export: `5714090adf0cfd616c4f7b68d2f04ca86f2df23ce6135890c5f2a159bbdcc03a`
+- fleet runtime: `ajsathyan/agora-runpod@6321d9423b8f2ed99c0d6947595cc6a6bfcde925`
+- fleet source tree: `269c215f3cc48c5cb84a09ddb02768c4f34a7b1d`
+- runtime export: `e2c14a9aea8b124523885a22592404dab5ea75f6603b7124a69596f67135f488`
 - px0: `v0.1.6`, verified by the SHA-256 in `Dockerfile`
 - in-place repair build tooling: exact wheel hashes in
   `image-repair-build-requirements.txt`
@@ -61,17 +61,17 @@ contract as machine provenance
 writes these files through its existing machine-scoped SSH path:
 
 ```text
-/workspace/agora-run/controller-input/machine-config.json  (0600)
-/workspace/agora-run/controller-input/hf-token             (0600)
+/var/lib/agora-runtime/controller-input/machine-config.json  (0600)
+/var/lib/agora-runtime/controller-input/hf-token             (0600)
 ```
 
 The config schema is `agora.machine-image-config.v1`. The bootstrap is:
 
 ```text
 /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
-  --config /workspace/agora-run/controller-input/machine-config.json \
-  --token-file /workspace/agora-run/controller-input/hf-token \
-  --receipt /workspace/agora-run/bootstrap-receipt.json
+  --config /var/lib/agora-runtime/controller-input/machine-config.json \
+  --token-file /var/lib/agora-runtime/controller-input/hf-token \
+  --receipt /var/lib/agora-runtime/bootstrap-receipt.json
 ```
 
 The receipt schema is `agora.machine-image-bootstrap-receipt.v1`. The controller
@@ -92,6 +92,11 @@ symlinks, non-regular files, and mounts such as VFAT that cannot enforce those
 modes before it persists a secret or starts training. The canonical active-root
 pointer binds machine and assignment generation; manual restart without an active
 pointer waits for controller configuration instead of guessing a default root.
+New managed launches use `/var/lib/agora-runtime`; an explicit legacy config keeps
+its recorded root. Explicit normalized private alternatives are accepted when the
+host preflight can enforce those controls. Runtime-root retention depends on the
+provider and selected storage lifecycle, so it is not a backup and must not be
+assumed to survive restart, deletion, or replacement.
 
 A strict `prepared` receipt is durable before training starts. If a later required
 step fails, bootstrap stops only its exact owned `agora_gpu` session and records
@@ -121,9 +126,13 @@ SSH+1.
 Missing metadata records `waiting_for_network_config`; malformed or conflicting
 input records `invalid_input`. Both leave SSH/container life intact for the
 controller's SSH fallback. `/start.sh`, Vast `onstart`, repair, and reboot share
-one starter/assignment lock. A saved newer ready assignment restarts from its
-canonical 0600 input; staged, fenced, paused, corrupt, or stale launch state
-stays stopped. `training-intent.json` records running versus paused intent.
+one short bootstrap lock. Vast supplies the reserved variables through its native
+environment field and invokes `/start.sh` in one-shot mode from `onstart` when
+configuration arrives after neutral PID 1. The lock is released after status is
+durable; only PID 1 owns container lifetime. A saved newer ready assignment
+restarts from its canonical 0600 input; staged, fenced, paused, corrupt, or stale
+launch state stays stopped. `training-intent.json` records running versus paused
+intent.
 
 Configured heartbeat uses a separately written 0600 machine-secret dotenv file;
 the image never receives the controller's master heartbeat secret. Its baked
@@ -165,7 +174,7 @@ Refresh the copied allowlist on demand with:
 
 ```bash
 /opt/agora-venv/bin/python /opt/agora-image-runtime/refresh_inspection.py \
-  --root /workspace/agora-run --inspection-root /run/agora-inspection
+  --root /var/lib/agora-runtime --inspection-root /run/agora-inspection
 ```
 
 ## Rebuild the fleet runtime export
@@ -175,7 +184,7 @@ Use a fleet clone containing the reviewed exact commit:
 ```bash
 python3 tools/export_fleet_runtime.py \
   --source-repo /absolute/path/to/agora-runpod \
-  --source-commit 5c2000b4bb107a6102d72e9664c8bf65c9bdc18f \
+  --source-commit 6321d9423b8f2ed99c0d6947595cc6a6bfcde925 \
   --output-dir machine-runtime
 python3 -m unittest tests.test_runtime_export -v
 ```

@@ -13,6 +13,14 @@ ASSERTION = ROOT / "tests" / "assert-neutral-image-runtime.sh"
 
 
 class NeutralRuntimeAssertionTests(unittest.TestCase):
+    def test_default_receipt_tracks_managed_runtime_root(self) -> None:
+        assertion = ASSERTION.read_text(encoding="utf-8")
+        self.assertIn(
+            "AGORA_NEUTRAL_RECEIPT_FILE:-/var/lib/agora-runtime/"
+            "bootstrap-receipt.json",
+            assertion,
+        )
+
     def _run(
         self,
         *,

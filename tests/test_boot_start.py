@@ -40,10 +40,10 @@ def launch(token: str = "fixture-token") -> str:
 
 
 class BootStartTests(unittest.TestCase):
-    def test_entrypoint_keeps_pid1_lock_but_closes_it_for_bootstrap_child(self) -> None:
+    def test_entrypoint_serializes_bootstrap_then_releases_lock_before_pid1_keepalive(self) -> None:
         entrypoint = (ROOT / "start.sh").read_text(encoding="utf-8")
         self.assertIn("exec 9>/run/agora-image-start.lock", entrypoint)
-        self.assertIn("if ! flock -n 9; then", entrypoint)
+        self.assertIn("if ! flock -w 120 9; then", entrypoint)
         self.assertRegex(
             entrypoint,
             r"trap - ERR\nset \+e\nenv \\\n"
@@ -52,6 +52,12 @@ class BootStartTests(unittest.TestCase):
             r"\s+9>&- \\\n\s+>/var/log/agora-image-bootstrap\.log 2>&1\n"
             r"bootstrap_rc=\$\?\nset -e\ntrap start_failure ERR",
         )
+        self.assertLess(
+            entrypoint.index('log_start_stage bootstrap_complete "$bootstrap_rc"'),
+            entrypoint.index("flock -u 9"),
+        )
+        self.assertLess(entrypoint.index("flock -u 9"), entrypoint.index("exec 9>&-"))
+        self.assertIn('if [[ "$image_start_oneshot" == "1" || "$$" -ne 1 ]]', entrypoint)
         self.assertIn("exec sleep infinity", entrypoint)
 
     def test_active_root_pointer_is_private_idempotent_and_generation_fenced(self) -> None:
@@ -328,6 +334,64 @@ class BootStartTests(unittest.TestCase):
                 ),
                 "saved",
             )
+
+    def test_same_generation_launch_replay_reports_saved_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "runtime"
+            root.mkdir()
+            status = Path(directory) / "status.json"
+            token = "fixture-token"
+            payload = json.loads(base64.b64decode(launch(token), validate=True))
+            payload["config"]["remoteRoot"] = str(root)
+            encoded = base64.b64encode(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            ).decode()
+            environment = {
+                "AGORA_BOOT_AUTOSTART": "1",
+                "AGORA_BOOT_LAUNCH_B64": encoded,
+                "AGORA_BOOT_HF_TOKEN": token,
+            }
+
+            def first_boot(*_args, **_kwargs):
+                (root / "assignment.json").write_text(
+                    json.dumps({"state": "ready", "assignmentGeneration": 1}),
+                    encoding="utf-8",
+                )
+                (root / "training-intent.json").write_text(
+                    json.dumps(
+                        {
+                            "desiredState": "running",
+                            "assignmentGeneration": 1,
+                            "operationId": "operation-a",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return 0
+
+            with (
+                mock.patch.object(boot, "STATUS", status),
+                mock.patch.object(boot, "_verify_boot_capability"),
+                mock.patch.object(
+                    boot,
+                    "resolve_provider_metadata_with_retry",
+                    return_value=("pod-a", 49200),
+                ),
+                mock.patch.object(boot, "_run_bootstrap", side_effect=first_boot) as run,
+                mock.patch.object(boot, "_saved_boot", return_value=0) as saved,
+            ):
+                self.assertEqual(boot.main(environment), 0)
+                first_status = json.loads(status.read_text(encoding="utf-8"))
+                self.assertEqual(first_status["state"], "ready")
+                self.assertEqual(first_status["selection"], "launch")
+
+                self.assertEqual(boot.main(environment), 0)
+                replay_status = json.loads(status.read_text(encoding="utf-8"))
+                self.assertEqual(replay_status["state"], "ready")
+                self.assertEqual(replay_status["selection"], "saved")
+
+            run.assert_called_once()
+            saved.assert_called_once_with(root, environment)
 
     def test_bootstrap_child_environment_excludes_launch_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

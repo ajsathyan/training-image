@@ -30,7 +30,7 @@ from assignment_transition import (  # noqa: E402
 SCHEMA = "agora.machine-boot-launch.v1"
 BOOTSTRAP = Path("/opt/agora-image-runtime/agora_image_bootstrap.py")
 PYTHON = Path("/opt/agora-venv/bin/python")
-DEFAULT_ROOT = Path("/workspace/agora-run")
+DEFAULT_ROOT = Path("/var/lib/agora-runtime")
 STAGING_ROOT = Path(os.environ.get("AGORA_BOOT_STAGING_ROOT", "/run"))
 STATUS = Path("/run/agora-image-bootstrap.status.json")
 CAPABILITY = Path("/opt/agora-image-runtime/capability.json")
