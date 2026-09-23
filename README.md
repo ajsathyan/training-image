@@ -61,17 +61,17 @@ contract as machine provenance
 writes these files through its existing machine-scoped SSH path:
 
 ```text
-/workspace/agora-run/controller-input/machine-config.json  (0600)
-/workspace/agora-run/controller-input/hf-token             (0600)
+/var/lib/agora-runtime/controller-input/machine-config.json  (0600)
+/var/lib/agora-runtime/controller-input/hf-token             (0600)
 ```
 
 The config schema is `agora.machine-image-config.v1`. The bootstrap is:
 
 ```text
 /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
-  --config /workspace/agora-run/controller-input/machine-config.json \
-  --token-file /workspace/agora-run/controller-input/hf-token \
-  --receipt /workspace/agora-run/bootstrap-receipt.json
+  --config /var/lib/agora-runtime/controller-input/machine-config.json \
+  --token-file /var/lib/agora-runtime/controller-input/hf-token \
+  --receipt /var/lib/agora-runtime/bootstrap-receipt.json
 ```
 
 The receipt schema is `agora.machine-image-bootstrap-receipt.v1`. The controller
@@ -92,6 +92,10 @@ symlinks, non-regular files, and mounts such as VFAT that cannot enforce those
 modes before it persists a secret or starts training. The canonical active-root
 pointer binds machine and assignment generation; manual restart without an active
 pointer waits for controller configuration instead of guessing a default root.
+New managed launches use `/var/lib/agora-runtime`; an explicit legacy config keeps
+its recorded root. This location is provider container-disk state, not a backup:
+it may survive a restart when the disk is retained, but deletion or replacement
+can discard it.
 
 A strict `prepared` receipt is durable before training starts. If a later required
 step fails, bootstrap stops only its exact owned `agora_gpu` session and records
@@ -121,9 +125,13 @@ SSH+1.
 Missing metadata records `waiting_for_network_config`; malformed or conflicting
 input records `invalid_input`. Both leave SSH/container life intact for the
 controller's SSH fallback. `/start.sh`, Vast `onstart`, repair, and reboot share
-one starter/assignment lock. A saved newer ready assignment restarts from its
-canonical 0600 input; staged, fenced, paused, corrupt, or stale launch state
-stays stopped. `training-intent.json` records running versus paused intent.
+one short bootstrap lock. Vast supplies the reserved variables through its native
+environment field and invokes `/start.sh` in one-shot mode from `onstart` when
+configuration arrives after neutral PID 1. The lock is released after status is
+durable; only PID 1 owns container lifetime. A saved newer ready assignment
+restarts from its canonical 0600 input; staged, fenced, paused, corrupt, or stale
+launch state stays stopped. `training-intent.json` records running versus paused
+intent.
 
 Configured heartbeat uses a separately written 0600 machine-secret dotenv file;
 the image never receives the controller's master heartbeat secret. Its baked
@@ -165,7 +173,7 @@ Refresh the copied allowlist on demand with:
 
 ```bash
 /opt/agora-venv/bin/python /opt/agora-image-runtime/refresh_inspection.py \
-  --root /workspace/agora-run --inspection-root /run/agora-inspection
+  --root /var/lib/agora-runtime --inspection-root /run/agora-inspection
 ```
 
 ## Rebuild the fleet runtime export

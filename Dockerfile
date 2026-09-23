@@ -80,9 +80,9 @@ RUN curl -fsSLo /tmp/px0 "https://github.com/px0-ai/px0/releases/download/v${PX0
     && rm -f /tmp/px0 \
     && px0 -version
 
-ARG FLEET_SOURCE_COMMIT=1f64d5bb47c473501099a5678800cdfe54deeb3f
-ARG FLEET_SOURCE_TREE=932af243584748933b5e116aebcd713e270faf29
-ARG FLEET_SOURCE_ARTIFACT_FINGERPRINT=b8e93a4700a7b1b2f621d18ff1c0c0e5d1ec96a0fb466b83377c4425f6e49eac
+ARG FLEET_SOURCE_COMMIT=60deb738eff80f681d183383df5c3c7b18267b2d
+ARG FLEET_SOURCE_TREE=a04fac9b0495c4f6ca6392d127d299b54bcc056d
+ARG FLEET_SOURCE_ARTIFACT_FINGERPRINT=77278aca32fc7f25fdd7d2e15ce82943f3be25a59c04023149a0b75397042e8f
 
 COPY machine-runtime /opt/agora-machine-runtime
 COPY image-runtime /opt/agora-image-runtime
@@ -173,10 +173,10 @@ capability = {
         "sha256": digest(image_runtime_dir / "agora_heartbeat_agent.py"),
     },
     "paths": {
-        "remoteRoot": "/workspace/agora-run",
-        "config": "/workspace/agora-run/controller-input/machine-config.json",
-        "hfToken": "/workspace/agora-run/controller-input/hf-token",
-        "receipt": "/workspace/agora-run/bootstrap-receipt.json",
+        "remoteRoot": "/var/lib/agora-runtime",
+        "config": "/var/lib/agora-runtime/controller-input/machine-config.json",
+        "hfToken": "/var/lib/agora-runtime/controller-input/hf-token",
+        "receipt": "/var/lib/agora-runtime/bootstrap-receipt.json",
     },
     "fleetSource": manifest["source"],
     "runtimeExport": {

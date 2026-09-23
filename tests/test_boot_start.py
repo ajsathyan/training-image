@@ -40,10 +40,10 @@ def launch(token: str = "fixture-token") -> str:
 
 
 class BootStartTests(unittest.TestCase):
-    def test_entrypoint_keeps_pid1_lock_but_closes_it_for_bootstrap_child(self) -> None:
+    def test_entrypoint_serializes_bootstrap_then_releases_lock_before_pid1_keepalive(self) -> None:
         entrypoint = (ROOT / "start.sh").read_text(encoding="utf-8")
         self.assertIn("exec 9>/run/agora-image-start.lock", entrypoint)
-        self.assertIn("if ! flock -n 9; then", entrypoint)
+        self.assertIn("if ! flock -w 120 9; then", entrypoint)
         self.assertRegex(
             entrypoint,
             r"trap - ERR\nset \+e\nenv \\\n"
@@ -52,6 +52,12 @@ class BootStartTests(unittest.TestCase):
             r"\s+9>&- \\\n\s+>/var/log/agora-image-bootstrap\.log 2>&1\n"
             r"bootstrap_rc=\$\?\nset -e\ntrap start_failure ERR",
         )
+        self.assertLess(
+            entrypoint.index('log_start_stage bootstrap_complete "$bootstrap_rc"'),
+            entrypoint.index("flock -u 9"),
+        )
+        self.assertLess(entrypoint.index("flock -u 9"), entrypoint.index("exec 9>&-"))
+        self.assertIn('if [[ "$image_start_oneshot" == "1" || "$$" -ne 1 ]]', entrypoint)
         self.assertIn("exec sleep infinity", entrypoint)
 
     def test_active_root_pointer_is_private_idempotent_and_generation_fenced(self) -> None:

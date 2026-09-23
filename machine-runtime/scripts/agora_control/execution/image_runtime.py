@@ -26,7 +26,7 @@ CAPABILITY_PATH = "/opt/agora-image-runtime/capability.json"
 BOOTSTRAP_PATH = "/opt/agora-image-runtime/agora_image_bootstrap.py"
 PYTHON_PATH = "/opt/agora-venv/bin/python"
 TRAINING_SOURCE_ROOT = "/opt/agora-source"
-DEFAULT_REMOTE_ROOT = "/workspace/agora-run"
+DEFAULT_REMOTE_ROOT = "/var/lib/agora-runtime"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ASSIGNMENT_STATES = {"fenced", "staged", "ready"}
 _ASSIGNMENT_TRANSITIONS = {"stage", "ready", "rollback_prior"}
@@ -176,12 +176,16 @@ def merge_vast_boot_launch(
     starter_log: str = "/var/log/agora-image-start.log",
     error: type[Exception] = ValueError,
 ) -> dict[str, Any]:
-    """Merge Vast docker flags and append the shared starter to ssh_direct."""
+    """Merge native Vast API env and append the shared one-shot starter."""
 
     result = dict(payload)
     env = dict(result.get("env") or {})
-    reserved_flags = {f"-e {name}" for name in BOOT_RESERVED_ENV}
-    collisions = reserved_flags.intersection(str(key) for key in env)
+    reserved_aliases = {
+        alias
+        for name in BOOT_RESERVED_ENV
+        for alias in (name, f"-e {name}")
+    }
+    collisions = reserved_aliases.intersection(str(key) for key in env)
     if collisions:
         raise error(
             "Vast launch environment overrides reserved boot keys: "
@@ -189,11 +193,11 @@ def merge_vast_boot_launch(
         )
     env.update(
         {
-            f"-e {BOOT_AUTOSTART_ENV}": "1",
-            f"-e {BOOT_LAUNCH_ENV}": encode_machine_boot_launch(
+            BOOT_AUTOSTART_ENV: "1",
+            BOOT_LAUNCH_ENV: encode_machine_boot_launch(
                 launch, error=error
             ),
-            f"-e {BOOT_TOKEN_ENV}": token,
+            BOOT_TOKEN_ENV: token,
         }
     )
     onstart = str(result.get("onstart") or "").rstrip()
@@ -206,7 +210,8 @@ def merge_vast_boot_launch(
         )
     result["onstart"] = (
         preserved
-        + f"nohup {shlex.quote(starter_path)} >{shlex.quote(starter_log)} 2>&1 &\n"
+        + "nohup env AGORA_IMAGE_START_ONESHOT=1 "
+        + f"{shlex.quote(starter_path)} >{shlex.quote(starter_log)} 2>&1 &\n"
         + "true"
     )
     result["env"] = env
@@ -489,7 +494,7 @@ def _optional_positive_int(machine: Mapping[str, Any], name: str) -> int | None:
 
 
 def _remote_root(machine: Mapping[str, Any], *, error: type[Exception]) -> str:
-    value = str(machine.get("remoteRoot") or DEFAULT_REMOTE_ROOT).strip()
+    value = str(machine.get("remoteRoot") or "").strip()
     components = [part for part in value.split("/") if part]
     if (
         not value.startswith("/")
