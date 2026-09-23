@@ -102,11 +102,16 @@ terminate_and_reap_child "lifecycle control" "$lifecycle_pid"
 assert_child_exited "lifecycle control" "$lifecycle_pid"
 
 stubborn_ready="$work/stubborn-ready"
-(
-  trap '' TERM
-  printf '%s\n' ready > "$stubborn_ready"
-  while :; do sleep 1; done
-) &
+python3 - "$stubborn_ready" <<'PY' &
+import pathlib
+import signal
+import sys
+import time
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path(sys.argv[1]).write_text("ready\n", encoding="utf-8")
+time.sleep(30)
+PY
 stubborn_pid=$!
 for _ in $(seq 1 50); do
   test -f "$stubborn_ready" && break
