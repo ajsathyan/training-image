@@ -18,9 +18,9 @@ its immediate rollback is
 
 - upstream image: `ghcr.io/pluralisresearch/agora-test@sha256:da54b2e3e37b90f9f62d9a04546a95e3bd4711fb4641bd61c13e3db8561a1326`
 - Agora training source: `PluralisResearch/agora-test@71a44b894100baa8f2996b97e73ae0bd67fa6b9d`
-- fleet runtime: `ajsathyan/agora-runpod@5c2000b4bb107a6102d72e9664c8bf65c9bdc18f`
-- fleet source tree: `ad7385d3ca1462604eac214a0af8cc30cfdda204`
-- runtime export: `5714090adf0cfd616c4f7b68d2f04ca86f2df23ce6135890c5f2a159bbdcc03a`
+- fleet runtime: `ajsathyan/agora-runpod@9e30750ba8aa3122238da5d4f448f59d493e6563`
+- fleet source tree: `406228725ea83cc2b7aac9e7c2080b2224f69ef3`
+- runtime export: `92c0e65ab5a6fde2f4899cd174a66bbbb7b1d9488092ae9ee5ff1b6eef4e75f7`
 - px0: `v0.1.6`, verified by the SHA-256 in `Dockerfile`
 - in-place repair build tooling: exact wheel hashes in
   `image-repair-build-requirements.txt`
@@ -183,7 +183,7 @@ Use a fleet clone containing the reviewed exact commit:
 ```bash
 python3 tools/export_fleet_runtime.py \
   --source-repo /absolute/path/to/agora-runpod \
-  --source-commit 5c2000b4bb107a6102d72e9664c8bf65c9bdc18f \
+  --source-commit 9e30750ba8aa3122238da5d4f448f59d493e6563 \
   --output-dir machine-runtime
 python3 -m unittest tests.test_runtime_export -v
 ```
