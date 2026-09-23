@@ -4,7 +4,7 @@ set -Eeuo pipefail
 status_file="${AGORA_NEUTRAL_STATUS_FILE:-/run/agora-image-bootstrap.status}"
 status_json="${AGORA_NEUTRAL_STATUS_JSON:-/run/agora-image-bootstrap.status.json}"
 bootstrap_log="${AGORA_NEUTRAL_BOOTSTRAP_LOG:-/var/log/agora-image-bootstrap.log}"
-receipt_file="${AGORA_NEUTRAL_RECEIPT_FILE:-/workspace/agora-run/bootstrap-receipt.json}"
+receipt_file="${AGORA_NEUTRAL_RECEIPT_FILE:-/var/lib/agora-runtime/bootstrap-receipt.json}"
 
 test "$(cat "$status_file")" = 0
 jq -e '

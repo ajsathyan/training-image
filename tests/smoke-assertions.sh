@@ -108,6 +108,29 @@ terminate_and_reap_child() {
   assert_child_exited "$label" "$pid"
 }
 
+run_docker_image_bootstrap_for_root() {
+  if [ "$#" -ne 2 ]; then
+    printf '%s\n' \
+      'run_docker_image_bootstrap_for_root requires a container and runtime root' \
+      >&2
+    return 2
+  fi
+  local container="$1"
+  local root="$2"
+  case "$root" in
+    /*) ;;
+    *)
+      printf 'runtime root must be absolute: %s\n' "$root" >&2
+      return 2
+      ;;
+  esac
+  docker exec "$container" /opt/agora-venv/bin/python \
+    /opt/agora-image-runtime/agora_image_bootstrap.py \
+    --config "$root/controller-input/machine-config.json" \
+    --token-file "$root/controller-input/hf-token" \
+    --receipt "$root/bootstrap-receipt.json"
+}
+
 assert_absent_status() {
   local label="$1"
   shift

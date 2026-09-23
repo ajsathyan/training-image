@@ -20,11 +20,65 @@ exit "${FAKE_SS_STATUS:-0}"
 SH
 cat > "$work/bin/docker" <<'SH'
 #!/usr/bin/env bash
+if [ "${FAKE_DOCKER_MODE-}" = bootstrap ]; then
+  printf '%s\n' "$@" > "${FAKE_DOCKER_ARGV_FILE:?}"
+  expected_root="${FAKE_DOCKER_EXPECT_ROOT:?}"
+  expected_container="${FAKE_DOCKER_EXPECT_CONTAINER:?}"
+  if [ "$#" -ne 10 ] \
+    || [ "$1" != exec ] \
+    || [ "$2" != "$expected_container" ] \
+    || [ "$3" != /opt/agora-venv/bin/python ] \
+    || [ "$4" != /opt/agora-image-runtime/agora_image_bootstrap.py ] \
+    || [ "$5" != --config ] \
+    || [ "$6" != "$expected_root/controller-input/machine-config.json" ] \
+    || [ "$7" != --token-file ] \
+    || [ "$8" != "$expected_root/controller-input/hf-token" ] \
+    || [ "$9" != --receipt ] \
+    || [ "${10}" != "$expected_root/bootstrap-receipt.json" ]; then
+    exit 64
+  fi
+  exit 0
+fi
 exit "${FAKE_DOCKER_STATUS:?}"
 SH
 chmod +x "$work/bin/tmux" "$work/bin/ss" "$work/bin/docker"
 PATH="$work/bin:$PATH"
 export PATH
+
+# Exercise the exact helper used by each configured/training direct bootstrap.
+# The fake consumer accepts only a single internally consistent root and records
+# the argv so missing, mismatched, or reordered paths cannot pass this control.
+FAKE_DOCKER_MODE=bootstrap
+FAKE_DOCKER_EXPECT_ROOT=/workspace/agora-run
+FAKE_DOCKER_EXPECT_CONTAINER=fixture
+FAKE_DOCKER_ARGV_FILE="$work/bootstrap-argv"
+export FAKE_DOCKER_MODE FAKE_DOCKER_EXPECT_ROOT FAKE_DOCKER_EXPECT_CONTAINER
+export FAKE_DOCKER_ARGV_FILE
+run_docker_image_bootstrap_for_root fixture /workspace/agora-run
+cat > "$work/bootstrap-argv.expected" <<'EOF'
+exec
+fixture
+/opt/agora-venv/bin/python
+/opt/agora-image-runtime/agora_image_bootstrap.py
+--config
+/workspace/agora-run/controller-input/machine-config.json
+--token-file
+/workspace/agora-run/controller-input/hf-token
+--receipt
+/workspace/agora-run/bootstrap-receipt.json
+EOF
+diff -u "$work/bootstrap-argv.expected" "$work/bootstrap-argv"
+if run_docker_image_bootstrap_for_root fixture /workspace/wrong-root \
+  2>/dev/null; then
+  printf '%s\n' 'bootstrap helper accepted paths for the wrong runtime root' >&2
+  exit 1
+fi
+if run_docker_image_bootstrap_for_root fixture 2>/dev/null; then
+  printf '%s\n' 'bootstrap helper accepted a missing runtime root' >&2
+  exit 1
+fi
+unset FAKE_DOCKER_MODE FAKE_DOCKER_EXPECT_ROOT FAKE_DOCKER_EXPECT_CONTAINER
+unset FAKE_DOCKER_ARGV_FILE
 
 (exit 0) &
 success_one=$!

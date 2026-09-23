@@ -36,6 +36,7 @@ capture_failure() {
     > "$destination/$name/container.log" || true
   docker exec "$name" sh -c '
     for path in /run/agora-image-bootstrap.status /run/agora-image-bootstrap.status.json \
+      /var/lib/agora-runtime/bootstrap-receipt.json \
       /workspace/agora-run/bootstrap-receipt.json; do
       if test -f "$path"; then printf "== %s ==\n" "$path"; cat "$path"; fi
     done
@@ -442,8 +443,7 @@ docker exec "$configured" sh -c \
   'chmod 600 /workspace/agora-run/.assignment.newer.json && mv /workspace/agora-run/.assignment.newer.json /workspace/agora-run/assignment.json'
 newer_fence_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/assignment.json | awk '{print $1}')"
 set +e
-docker exec "$configured" /opt/agora-venv/bin/python \
-  /opt/agora-image-runtime/agora_image_bootstrap.py \
+run_docker_image_bootstrap_for_root "$configured" /workspace/agora-run \
   > "$work/image-smoke-stale-stage.log" 2>&1
 stale_stage_rc=$?
 set -e
@@ -465,8 +465,7 @@ docker cp "$work/configured-rollback-config.json" \
   "$configured:/workspace/agora-run/controller-input/.machine-config.rollback"
 docker exec "$configured" sh -c \
   'chmod 600 /workspace/agora-run/controller-input/.machine-config.rollback && mv /workspace/agora-run/controller-input/.machine-config.rollback /workspace/agora-run/controller-input/machine-config.json'
-docker exec "$configured" /opt/agora-venv/bin/python \
-  /opt/agora-image-runtime/agora_image_bootstrap.py \
+run_docker_image_bootstrap_for_root "$configured" /workspace/agora-run \
   > "$work/image-smoke-rollback.log" 2>&1
 rollback_hash="$(docker exec "$configured" sha256sum /workspace/agora-run/assignment.json | awk '{print $1}')"
 docker exec "$configured" jq -e '.status == "ready" and
@@ -475,8 +474,7 @@ docker exec "$configured" jq -e '.status == "ready" and
   .assignmentTransition.rollbackAuthorized == true' \
   /workspace/agora-run/bootstrap-receipt.json >/dev/null
 docker exec "$configured" rm /workspace/agora-run/bootstrap-receipt.json
-docker exec "$configured" /opt/agora-venv/bin/python \
-  /opt/agora-image-runtime/agora_image_bootstrap.py \
+run_docker_image_bootstrap_for_root "$configured" /workspace/agora-run \
   > "$work/image-smoke-rollback-replay.log" 2>&1
 test "$(docker exec "$configured" sha256sum /workspace/agora-run/assignment.json | awk '{print $1}')" = "$rollback_hash"
 docker exec "$configured" jq -e '.status == "ready" and
@@ -487,8 +485,7 @@ docker cp "$work/configured-stage-config.json" \
   "$configured:/workspace/agora-run/controller-input/.machine-config.stage"
 docker exec "$configured" sh -c \
   'chmod 600 /workspace/agora-run/controller-input/.machine-config.stage && mv /workspace/agora-run/controller-input/.machine-config.stage /workspace/agora-run/controller-input/machine-config.json'
-docker exec "$configured" /opt/agora-venv/bin/python \
-  /opt/agora-image-runtime/agora_image_bootstrap.py \
+run_docker_image_bootstrap_for_root "$configured" /workspace/agora-run \
   > "$work/image-smoke-restage.log" 2>&1
 docker exec "$configured" jq -e \
   '.status == "ready" and .assignmentTransition.state == "staged"' \
@@ -847,8 +844,7 @@ docker cp "$work/training-stage-config.json" \
   "$training:/workspace/agora-run/controller-input/.machine-config.stage"
 docker exec "$training" sh -c \
   'chmod 600 /workspace/agora-run/controller-input/.machine-config.stage && mv /workspace/agora-run/controller-input/.machine-config.stage /workspace/agora-run/controller-input/machine-config.json'
-docker exec "$training" /opt/agora-venv/bin/python \
-  /opt/agora-image-runtime/agora_image_bootstrap.py \
+run_docker_image_bootstrap_for_root "$training" /workspace/agora-run \
   > "$work/image-smoke-ready-stage-replay.log" 2>&1
 docker exec "$training" jq -e '.status == "ready" and
   .assignmentTransition.kind == "stage" and
