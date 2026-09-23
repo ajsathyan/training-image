@@ -26,6 +26,51 @@ chmod +x "$work/bin/tmux" "$work/bin/ss" "$work/bin/docker"
 PATH="$work/bin:$PATH"
 export PATH
 
+(exit 0) &
+success_one=$!
+(exit 0) &
+success_two=$!
+wait_for_children_success "two successful replay children" \
+  "$success_one" "$success_two"
+
+(exit 75) &
+failed_first=$!
+(sleep 30) &
+cancelled_second=$!
+if wait_for_children_success "first replay child failure" \
+  "$failed_first" "$cancelled_second" 2>/dev/null; then
+  printf '%s\n' 'first replay child failure was accepted' >&2
+  exit 1
+fi
+if kill -0 "$cancelled_second" 2>/dev/null; then
+  printf '%s\n' 'sibling replay child leaked after first failure' >&2
+  exit 1
+fi
+
+(exit 0) &
+successful_first=$!
+(exit 75) &
+failed_second=$!
+if wait_for_children_success "second replay child failure" \
+  "$successful_first" "$failed_second" 2>/dev/null; then
+  printf '%s\n' 'second replay child failure was accepted' >&2
+  exit 1
+fi
+
+FAKE_TMUX_STATUS=0
+export FAKE_TMUX_STATUS
+(exit 75) &
+masked_failure_one=$!
+(exit 75) &
+masked_failure_two=$!
+if wait_for_children_success "replay failure with prior trainer" \
+  "$masked_failure_one" "$masked_failure_two" 2>/dev/null \
+  && tmux has-session -t agora_gpu; then
+  printf '%s\n' 'prior trainer state masked replay child failure' >&2
+  exit 1
+fi
+tmux has-session -t agora_gpu
+
 FAKE_TMUX_STATUS=1
 export FAKE_TMUX_STATUS
 assert_no_tmux_session "legitimate absent session" agora_gpu

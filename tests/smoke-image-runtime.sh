@@ -630,10 +630,10 @@ while not stop:
 PY
 chmod 644 "$work/fake-agora-cli.py"
 
-# Reproduce Vast's real ordering: the image first starts neutral and keeps SSH
-# alive, then provider onstart supplies native env to a one-shot /start.sh in
-# the same container. Concurrent replays must serialize without another trainer
-# or an immortal helper process.
+# Exercise the image entrypoint timing with docker-exec environment staging: the
+# image first starts neutral and keeps SSH alive, then a one-shot /start.sh runs
+# in the same container. This does not prove Vast API environment injection.
+# Concurrent replays must serialize without another trainer or immortal helper.
 delayed_token="hf_fixture_delayed_vast_token_789"
 delayed_token_hash="$(printf '%s' "$delayed_token" | sha256sum | awk '{print $1}')"
 jq -n \
@@ -679,8 +679,9 @@ docker exec "$neutral" jq -e \
 test "$(docker exec "$neutral" tmux list-sessions -F '#{session_name}' | grep -xc agora_gpu)" = 1
 test "$(docker exec "$neutral" sh -c 'ps -eo args= | grep -Fxc "sleep infinity"')" = 1
 wait_for_ssh "$neutral_port"
+delayed_replay_pids=()
 for replay in 1 2; do
-  docker exec \
+  timeout -k 5s 120s docker exec \
     -e AGORA_IMAGE_START_ONESHOT=1 \
     -e AGORA_BOOT_AUTOSTART=1 \
     -e AGORA_BOOT_LAUNCH_B64="$delayed_vast_launch_b64" \
@@ -688,8 +689,20 @@ for replay in 1 2; do
     -e CONTAINER_ID=880001 \
     -e VAST_TCP_PORT_49200=55123 \
     "$neutral" /start.sh >"$work/delayed-replay-$replay.log" 2>&1 &
+  delayed_replay_pids+=("$!")
 done
-wait
+wait_for_children_success \
+  "delayed Vast concurrent replay" "${delayed_replay_pids[@]}"
+docker exec "$neutral" jq -e \
+  '.state == "ready" and .selection == "launch"' \
+  /run/agora-image-bootstrap.status.json >/dev/null
+docker exec "$neutral" jq -e \
+  '.status == "ready" and
+   .provider == "vast" and
+   .providerResourceId == "880001" and
+   .assignmentOperationId == "assignment-operation-delayed-vast" and
+   .assignmentGeneration == 1' \
+  /var/lib/agora-runtime/bootstrap-receipt.json >/dev/null
 test "$(docker exec "$neutral" tmux list-sessions -F '#{session_name}' | grep -xc agora_gpu)" = 1
 test "$(docker exec "$neutral" sh -c 'ps -eo args= | grep -Fxc "sleep infinity"')" = 1
 test "$(docker exec "$neutral" stat -c %a /var/lib/agora-runtime)" = 700

@@ -4,6 +4,52 @@
 # proof only when the inspection command succeeds and the forbidden value is
 # absent; inspection errors must fail instead of being mistaken for absence.
 
+wait_for_children_success() {
+  local label="$1"
+  shift
+  local pids=("$@")
+  local first_failure=0
+  local pid other status attempt
+
+  if [ "${#pids[@]}" -eq 0 ]; then
+    printf 'no child processes supplied: %s\n' "$label" >&2
+    return 2
+  fi
+
+  for pid in "${pids[@]}"; do
+    if wait "$pid"; then
+      status=0
+    else
+      status=$?
+    fi
+    if [ "$status" -eq 0 ]; then
+      continue
+    fi
+    if [ "$first_failure" -eq 0 ]; then
+      first_failure="$status"
+      printf 'required child failed: %s (pid %s, status %s)\n' \
+        "$label" "$pid" "$status" >&2
+      for other in "${pids[@]}"; do
+        if [ "$other" = "$pid" ] || ! kill -0 "$other" 2>/dev/null; then
+          continue
+        fi
+        kill -TERM "$other" 2>/dev/null || true
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          kill -0 "$other" 2>/dev/null || break
+          sleep 0.05
+        done
+        if kill -0 "$other" 2>/dev/null; then
+          kill -KILL "$other" 2>/dev/null || true
+        fi
+      done
+    fi
+  done
+
+  if [ "$first_failure" -ne 0 ]; then
+    return "$first_failure"
+  fi
+}
+
 assert_absent_status() {
   local label="$1"
   shift
