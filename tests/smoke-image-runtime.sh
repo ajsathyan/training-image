@@ -338,9 +338,14 @@ PY
   # when no tmux session represents it. The source file is restored before any
   # repair check, and the fixture makes no network or GPU request.
   server_path=/opt/agora-source/agora/src/agora/run_server.py
+  orphan_ready=/tmp/image-smoke-orphan-ready
+  rm -f "$orphan_ready"
   cp -p "$server_path" /tmp/run_server.py.image-smoke-backup
   cat > "$server_path" <<'\''PY'\''
+import pathlib
 import time
+
+pathlib.Path("/tmp/image-smoke-orphan-ready").write_text("ready\n", encoding="utf-8")
 while True:
     time.sleep(1)
 PY
@@ -350,11 +355,43 @@ PY
     echo $! > "$root/orphan-owned-process.pid"
   )
   orphan_pid="$(cat "$root/orphan-owned-process.pid")"
-  for _ in $(seq 1 20); do
-    if kill -0 "$orphan_pid" 2>/dev/null; then break; fi
+  orphan_identity_ready() {
+    /opt/agora-venv/bin/python - "$orphan_pid" "$server_path" <<'\''PY'\''
+import os
+import pathlib
+import sys
+
+pid, expected_script = sys.argv[1:]
+proc = pathlib.Path("/proc") / pid
+try:
+    argv = (proc / "cmdline").read_bytes().split(b"\0")
+    cwd = os.readlink(proc / "cwd")
+    state = (proc / "stat").read_text(encoding="utf-8").rsplit(") ", 1)[1].split()[0]
+except (OSError, IndexError):
+    raise SystemExit(1)
+argv = [value.decode("utf-8", errors="surrogateescape") for value in argv if value]
+raise SystemExit(
+    0
+    if len(argv) >= 2
+    and argv[0] == "/opt/agora-venv/bin/python"
+    and argv[1] == expected_script
+    and cwd == "/opt/agora-source"
+    and state != "Z"
+    else 1
+)
+PY
+  }
+  for _ in $(seq 1 50); do
+    if kill -0 "$orphan_pid" 2>/dev/null \
+      && test -f "$orphan_ready" \
+      && orphan_identity_ready; then
+      break
+    fi
     sleep 0.1
   done
   kill -0 "$orphan_pid"
+  test -f "$orphan_ready"
+  orphan_identity_ready
   mv /tmp/run_server.py.image-smoke-backup "$server_path"
   assignment_before="$(sha256sum "$root/assignment.json" | awk '\''{print $1}'\'')"
   orphan_bootstrap_rc=0
@@ -369,7 +406,7 @@ PY
   test "$(sha256sum "$root/assignment.json" | awk '\''{print $1}'\'')" = "$assignment_before"
   kill "$orphan_pid"
   wait "$orphan_pid" 2>/dev/null || true
-  rm -f "$root/orphan-owned-process.pid"
+  rm -f "$root/orphan-owned-process.pid" "$orphan_ready"
   /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
     > /tmp/image-smoke-orphan-retry.log 2>&1
   jq -e '\''.status == "ready" and .assignmentTransition.state == "staged"'\'' \
