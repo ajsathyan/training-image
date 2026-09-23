@@ -394,10 +394,15 @@ PY
   test -f "$orphan_ready"
   orphan_identity_ready
   mv /tmp/run_server.py.image-smoke-backup "$server_path"
+  configured_bootstrap() {
+    /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
+      --config "$root/controller-input/machine-config.json" \
+      --token-file "$root/controller-input/hf-token" \
+      --receipt "$root/bootstrap-receipt.json"
+  }
   assignment_before="$(sha256sum "$root/assignment.json" | awk '\''{print $1}'\'')"
   orphan_bootstrap_rc=0
-  if /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
-    > /tmp/image-smoke-orphan-bootstrap.log 2>&1; then
+  if configured_bootstrap > /tmp/image-smoke-orphan-bootstrap.log 2>&1; then
     :
   else
     orphan_bootstrap_rc=$?
@@ -410,8 +415,7 @@ PY
   terminate_and_reap_child "configured orphan Agora server" "$orphan_pid"
   assert_child_exited "configured orphan Agora server" "$orphan_pid"
   rm -f "$root/orphan-owned-process.pid" "$orphan_ready"
-  /opt/agora-venv/bin/python /opt/agora-image-runtime/agora_image_bootstrap.py \
-    > /tmp/image-smoke-orphan-retry.log 2>&1
+  configured_bootstrap > /tmp/image-smoke-orphan-retry.log 2>&1
   jq -e '\''.status == "ready" and .assignmentTransition.state == "staged"'\'' \
     "$root/bootstrap-receipt.json" >/dev/null
 '

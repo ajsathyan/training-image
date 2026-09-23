@@ -37,6 +37,15 @@ class SmokeAssertionControlTests(unittest.TestCase):
             '/workspace/agora-run/controller-input/machine-config.json',
             configured_fixture,
         )
+        self.assertIn(
+            '--config "$root/controller-input/machine-config.json"',
+            configured_fixture,
+        )
+        self.assertIn(
+            '--token-file "$root/controller-input/hf-token"', configured_fixture
+        )
+        self.assertIn('--receipt "$root/bootstrap-receipt.json"', configured_fixture)
+        self.assertEqual(configured_fixture.count("configured_bootstrap"), 3)
 
     def test_delayed_replay_waits_for_each_exact_child(self) -> None:
         smoke = (ROOT / "tests" / "smoke-image-runtime.sh").read_text(
