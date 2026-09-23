@@ -91,11 +91,18 @@ class SmokeAssertionControlTests(unittest.TestCase):
             delayed_fixture,
         )
         self.assertIn("timeout -k 5s 120s docker exec", delayed_fixture)
+        self.assertEqual(delayed_fixture.count('.selection == "launch"'), 1)
+        self.assertEqual(delayed_fixture.count('.selection == "saved"'), 1)
+        self.assertLess(
+            delayed_fixture.index('.selection == "launch"'),
+            delayed_fixture.index('.selection == "saved"'),
+        )
         self.assertIn(
             '.assignmentOperationId == "assignment-operation-delayed-vast"',
             delayed_fixture,
         )
         self.assertIn(".assignmentGeneration == 1", delayed_fixture)
+        self.assertIn(".assignmentTransition.idempotent == true", delayed_fixture)
 
 
 if __name__ == "__main__":

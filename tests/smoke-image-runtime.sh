@@ -735,14 +735,15 @@ done
 wait_for_children_success \
   "delayed Vast concurrent replay" "${delayed_replay_pids[@]}"
 docker exec "$neutral" jq -e \
-  '.state == "ready" and .selection == "launch"' \
+  '.state == "ready" and .selection == "saved"' \
   /run/agora-image-bootstrap.status.json >/dev/null
 docker exec "$neutral" jq -e \
   '.status == "ready" and
    .provider == "vast" and
    .providerResourceId == "880001" and
    .assignmentOperationId == "assignment-operation-delayed-vast" and
-   .assignmentGeneration == 1' \
+   .assignmentGeneration == 1 and
+   .assignmentTransition.idempotent == true' \
   /var/lib/agora-runtime/bootstrap-receipt.json >/dev/null
 test "$(docker exec "$neutral" tmux list-sessions -F '#{session_name}' | grep -xc agora_gpu)" = 1
 test "$(docker exec "$neutral" sh -c 'ps -eo args= | grep -Fxc "sleep infinity"')" = 1
