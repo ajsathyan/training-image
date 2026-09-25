@@ -40,7 +40,7 @@ def launch(token: str = "fixture-token") -> str:
 
 
 class BootStartTests(unittest.TestCase):
-    def test_entrypoint_serializes_bootstrap_then_releases_lock_before_pid1_keepalive(self) -> None:
+    def test_entrypoint_serializes_bootstrap_then_releases_lock_before_keepalive(self) -> None:
         entrypoint = (ROOT / "start.sh").read_text(encoding="utf-8")
         self.assertIn("exec 9>/run/agora-image-start.lock", entrypoint)
         self.assertIn("if ! flock -w 120 9; then", entrypoint)
@@ -57,7 +57,9 @@ class BootStartTests(unittest.TestCase):
             entrypoint.index("flock -u 9"),
         )
         self.assertLess(entrypoint.index("flock -u 9"), entrypoint.index("exec 9>&-"))
-        self.assertIn('if [[ "$image_start_oneshot" == "1" || "$$" -ne 1 ]]', entrypoint)
+        self.assertIn('if [[ "$image_start_oneshot" == "1" ]]', entrypoint)
+        self.assertNotIn('"$$" -ne 1', entrypoint)
+        self.assertIn('log_start_stage keepalive_exec_attempt', entrypoint)
         self.assertIn("exec sleep infinity", entrypoint)
 
     def test_active_root_pointer_is_private_idempotent_and_generation_fenced(self) -> None:

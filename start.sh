@@ -19,7 +19,7 @@ log_start_stage() {
         key_setup_ready|sshd_ready|cron_ready|environment_ready|\
         bootstrap_lock_timeout|bootstrap_lock_acquired|bootstrap_started|\
         bootstrap_complete|bootstrap_lock_released|helper_exit|\
-        pid1_keepalive_exec_attempt|start_sh_failed|start_sh_exit) ;;
+        keepalive_exec_attempt|start_sh_failed|start_sh_exit) ;;
         *) return 64 ;;
     esac
     local stage="$1" stage_rc="${2:-0}" stage_line="${3:-${BASH_LINENO[0]}}"
@@ -132,16 +132,16 @@ log_start_stage bootstrap_complete "$bootstrap_rc"
 
 # The lock serializes one bootstrap attempt, not the container lifetime. Vast
 # onstart and RunPod wrapper invocations are helpers and must be able to run
-# after the neutral PID1 attempt completes.
+# after the neutral entrypoint attempt completes.
 flock -u 9
 exec 9>&-
 log_start_stage bootstrap_lock_released
 
 unset boot_autostart boot_launch_b64 boot_hf_token boot_metadata_wait_seconds configured_public_key
-if [[ "$image_start_oneshot" == "1" || "$$" -ne 1 ]]; then
+if [[ "$image_start_oneshot" == "1" ]]; then
     log_start_stage helper_exit "$bootstrap_rc"
     exit "$bootstrap_rc"
 fi
 unset image_start_oneshot
-log_start_stage pid1_keepalive_exec_attempt
+log_start_stage keepalive_exec_attempt
 exec sleep infinity

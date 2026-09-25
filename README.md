@@ -10,17 +10,17 @@ build and run fresh-container tests without pushing. Merges to `main` publish
 `latest` and `sha-<commit>` through `.github/workflows/publish-image.yml`.
 
 The published baseline before this candidate is
-`sha256:d78059aa60a205f99c73f1d875dab447957320382d858163f3103a4f3a6c2f2c`;
+`sha256:dd649e6e3ceee6fda4e80b25118afc4bad115a091eaeff37f05fa2aef8469521`;
 its immediate rollback is
-`sha256:3cd92abfaf1e77800b66c748ac655cb2be7a91b90311e1d412ac90bd272dfd07`.
+`sha256:3b577dcf01b18032be8e271fcfc12d8ce03862a0eaf5ad3583e1f2bbacc2f2e3`.
 
 ## Pinned inputs
 
 - upstream image: `ghcr.io/pluralisresearch/agora-test@sha256:da54b2e3e37b90f9f62d9a04546a95e3bd4711fb4641bd61c13e3db8561a1326`
 - Agora training source: `PluralisResearch/agora-test@71a44b894100baa8f2996b97e73ae0bd67fa6b9d`
-- fleet runtime: `ajsathyan/agora-runpod@6321d9423b8f2ed99c0d6947595cc6a6bfcde925`
-- fleet source tree: `269c215f3cc48c5cb84a09ddb02768c4f34a7b1d`
-- runtime export: `e2c14a9aea8b124523885a22592404dab5ea75f6603b7124a69596f67135f488`
+- fleet runtime: `ajsathyan/agora-runpod@ee35fb4a93af54d095576a2170747b907d6e71df`
+- fleet source tree: `7cf4317094a4c49c419fc38be6a0267cf28b6a31`
+- runtime export: `25bbae9c6c036f246a7fe7899ae4f6765fdc9c1955250334dee64342fb7f0565`
 - px0: `v0.1.6`, verified by the SHA-256 in `Dockerfile`
 - in-place repair build tooling: exact wheel hashes in
   `image-repair-build-requirements.txt`
@@ -128,11 +128,16 @@ input records `invalid_input`. Both leave SSH/container life intact for the
 controller's SSH fallback. `/start.sh`, Vast `onstart`, repair, and reboot share
 one short bootstrap lock. Vast supplies the reserved variables through its native
 environment field and invokes `/start.sh` in one-shot mode from `onstart` when
-configuration arrives after neutral PID 1. The lock is released after status is
-durable; only PID 1 owns container lifetime. A saved newer ready assignment
-restarts from its canonical 0600 input; staged, fenced, paused, corrupt, or stale
-launch state stays stopped. `training-intent.json` records running versus paused
-intent.
+configuration arrives after neutral startup. RunPod also marks its detached
+starter one-shot when preserving a custom `dockerStartCmd`; the original custom
+command does not inherit that flag. The lock is released after status is durable.
+Only `AGORA_IMAGE_START_ONESHOT=1` makes `/start.sh` exit after bootstrap. An
+unmarked invocation, including a manual non-PID-1 call, stays alive in its
+keepalive process; use the one-shot flag when an exiting helper is intended.
+The `keepalive_exec_attempt` log stage records an exec attempt, not readiness.
+A saved newer ready assignment restarts from its canonical 0600 input; staged,
+fenced, paused, corrupt, or stale launch state stays stopped.
+`training-intent.json` records running versus paused intent.
 
 Configured heartbeat uses a separately written 0600 machine-secret dotenv file;
 the image never receives the controller's master heartbeat secret. Its baked
@@ -184,7 +189,7 @@ Use a fleet clone containing the reviewed exact commit:
 ```bash
 python3 tools/export_fleet_runtime.py \
   --source-repo /absolute/path/to/agora-runpod \
-  --source-commit 6321d9423b8f2ed99c0d6947595cc6a6bfcde925 \
+  --source-commit ee35fb4a93af54d095576a2170747b907d6e71df \
   --output-dir machine-runtime
 python3 -m unittest tests.test_runtime_export -v
 ```
