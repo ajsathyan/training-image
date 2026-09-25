@@ -159,7 +159,8 @@ def merge_runpod_boot_launch(
         result["dockerStartCmd"] = [
             "/bin/bash",
             "-lc",
-            f"nohup {shlex.quote(starter_path)} >{shlex.quote(starter_log)} 2>&1 & exec \"$@\"",
+            "nohup env AGORA_IMAGE_START_ONESHOT=1 "
+            f"{shlex.quote(starter_path)} >{shlex.quote(starter_log)} 2>&1 & exec \"$@\"",
             "agora-user-command",
             *original,
         ]

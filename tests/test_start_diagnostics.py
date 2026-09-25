@@ -1,12 +1,13 @@
 """Real-Bash startup rehearsal with isolated paths and external-command stubs.
 
-The PID1 test rewrites only the lifecycle predicate: it models that branch, not
-real container PID1. The existing container smoke remains the real PID1 proof.
+These tests exercise actual non-PID1 Bash processes. Container smoke separately
+checks PID1 composition; neither check proves a provider's process tree.
 """
 
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import re
 import subprocess
@@ -27,6 +28,18 @@ try:
     )
 except (OSError, subprocess.CalledProcessError):
     BASE = None  # A shallow CI checkout may omit the historical commit.
+# Reconstruct the exact published diagnostic script from the lifecycle and comment
+# changes. The pinned hash makes the old-behavior oracle independent of shallow
+# Git history while authenticating it against image commit 17864ef.
+OLD_DIAGNOSTIC = START.replace(
+    'if [[ "$image_start_oneshot" == "1" ]]; then',
+    'if [[ "$image_start_oneshot" == "1" || "$$" -ne 1 ]]; then',
+).replace("keepalive_exec_attempt", "pid1_keepalive_exec_attempt").replace(
+    "neutral entrypoint attempt", "neutral PID1 attempt"
+)
+assert hashlib.sha256(OLD_DIAGNOSTIC.encode()).hexdigest() == (
+    "53dbc187c6b83fc0fceea2f8c1c4c99f71516472d47ac4a36ab5cf516f4d6a20"
+)
 MARKER = re.compile(r"^stage=[a-z0-9_]+ rc=\d+ line=\d+ pid=\d+ ppid=\d+$")
 
 
@@ -37,7 +50,7 @@ def executable(path: Path, body: str) -> None:
 
 
 class StartFixture:
-    def __init__(self, base: Path, source: str = START, *, modeled_pid1: bool = False):
+    def __init__(self, base: Path, source: str = START):
         self.base = base
         self.bin = base / "bin"
         self.bin.mkdir(parents=True)
@@ -61,11 +74,6 @@ class StartFixture:
         }
         for old, new in sorted(paths.items(), key=lambda item: len(item[0]), reverse=True):
             source = source.replace(old, str(new))
-        if modeled_pid1:
-            old = '"$$" -ne 1'
-            assert source.count(old) == 1
-            source = source.replace(old, '"${AGORA_TEST_PID1:-0}" -ne 1')
-            self.env["AGORA_TEST_PID1"] = "1"
         self.script = base / "start.sh"
         executable(self.script, source)
         (base / "root").mkdir()
@@ -134,7 +142,7 @@ class StartDiagnosticsTests(unittest.TestCase):
                 self.assertNotIn("stage=", old_result.stderr)
         with tempfile.TemporaryDirectory() as directory:
             fixture = StartFixture(Path(directory) / "new")
-            result = fixture.run(AGORA_BOOT_HF_TOKEN="new-secret")
+            result = fixture.run(AGORA_BOOT_HF_TOKEN="new-secret", AGORA_IMAGE_START_ONESHOT="1")
             self.assertEqual(result.returncode, 0, result.stderr)
             stages = fixture.stages(result)
             self.assertEqual(
@@ -152,7 +160,10 @@ class StartDiagnosticsTests(unittest.TestCase):
             fixture = StartFixture(Path(directory))
             secrets = ["space secret", "quote'\"secret", "dollar$secret", "line1\nline2"]
             for secret in secrets:
-                result = fixture.run(AGORA_BOOT_AUTOSTART="1", AGORA_BOOT_HF_TOKEN=secret)
+                result = fixture.run(
+                    AGORA_BOOT_AUTOSTART="1", AGORA_BOOT_HF_TOKEN=secret,
+                    AGORA_IMAGE_START_ONESHOT="1",
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(fixture.status(), "0")
                 self.assertLess(
@@ -190,13 +201,13 @@ class StartDiagnosticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             fixture = StartFixture(Path(directory))
             (fixture.base / "log" / "onstart.log").mkdir()
-            result = fixture.run(AGORA_TEST_BOOT_RC="29")
+            result = fixture.run(AGORA_TEST_BOOT_RC="29", AGORA_IMAGE_START_ONESHOT="1")
             self.assertEqual(result.returncode, 29, result.stderr)
             self.assertEqual(fixture.status(), "29")
             self.assertEqual(fixture.stages(result)[-2:], ["helper_exit", "start_sh_exit"])
             closed = subprocess.run(
                 ["/bin/bash", str(fixture.script)],
-                env={**fixture.env, "AGORA_TEST_BOOT_RC": "31"},
+                env={**fixture.env, "AGORA_TEST_BOOT_RC": "31", "AGORA_IMAGE_START_ONESHOT": "1"},
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 preexec_fn=lambda: os.close(2),
@@ -205,34 +216,67 @@ class StartDiagnosticsTests(unittest.TestCase):
             self.assertEqual(closed.returncode, 31)
             self.assertEqual(fixture.status(), "31")
 
-    def test_bootstrap_failure_keeps_modeled_pid1_alive_after_status_and_unlock(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = StartFixture(Path(directory), modeled_pid1=True)
-            process = subprocess.Popen(
-                ["/bin/bash", str(fixture.script)],
-                env={**fixture.env, "AGORA_TEST_BOOT_RC": "29", "AGORA_BOOT_HF_TOKEN": "secret"},
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            try:
-                deadline = time.monotonic() + 5
-                while not (fixture.base / "keepalive-pid").exists() and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                self.assertTrue((fixture.base / "keepalive-pid").exists())
-                self.assertIsNone(process.poll())
-                self.assertEqual(fixture.status(), "29")
-                with (fixture.base / "run" / "start.lock").open() as lock:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                replay = fixture.run(AGORA_BOOT_AUTOSTART="1", AGORA_TEST_BOOT_RC="0", AGORA_TEST_PID1="0")
-                self.assertEqual(replay.returncode, 0, replay.stderr)
-                self.assertEqual(fixture.status(), "0")
-            finally:
-                process.terminate()
-                _, stderr = process.communicate(timeout=3)
-            self.assertIn("stage=bootstrap_complete rc=29", stderr)
-            self.assertIn("stage=pid1_keepalive_exec_attempt rc=0", stderr)
-            self.assertNotIn("stage=helper_exit", stderr)
+    def test_old_non_pid1_exits_but_unmarked_new_non_pid1_keeps_alive(self) -> None:
+        for bootstrap_rc in (0, 29):
+            with self.subTest(bootstrap_rc=bootstrap_rc), tempfile.TemporaryDirectory() as directory:
+                old = StartFixture(Path(directory) / "old", OLD_DIAGNOSTIC)
+                old_result = old.run(AGORA_TEST_BOOT_RC=str(bootstrap_rc))
+                self.assertEqual(old_result.returncode, bootstrap_rc)
+                self.assertEqual(old.status(), str(bootstrap_rc))
+                self.assertIn(f"stage=helper_exit rc={bootstrap_rc}", old_result.stderr)
+                self.assertNotIn("keepalive_exec_attempt", old_result.stderr)
+
+                fixture = StartFixture(Path(directory) / "new")
+                process = subprocess.Popen(
+                    ["/bin/bash", str(fixture.script)],
+                    env={**fixture.env, "AGORA_TEST_BOOT_RC": str(bootstrap_rc)},
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                stderr = ""
+                try:
+                    deadline = time.monotonic() + 5
+                    while not (fixture.base / "keepalive-pid").exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertTrue((fixture.base / "keepalive-pid").exists())
+                    self.assertEqual(int((fixture.base / "keepalive-pid").read_text()), process.pid)
+                    self.assertIsNone(process.poll())
+                    self.assertEqual(fixture.status(), str(bootstrap_rc))
+                    with (fixture.base / "run" / "start.lock").open() as lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+                    replay = fixture.run(
+                        AGORA_BOOT_AUTOSTART="1", AGORA_TEST_BOOT_RC="0",
+                        AGORA_IMAGE_START_ONESHOT="1",
+                    )
+                    self.assertEqual(replay.returncode, 0, replay.stderr)
+                    self.assertEqual(fixture.status(), "0")
+                    self.assertIsNone(process.poll())
+                finally:
+                    if process.poll() is None:
+                        process.terminate()
+                    try:
+                        _, stderr = process.communicate(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        _, stderr = process.communicate(timeout=3)
+                    self.assertIsNotNone(process.returncode)
+                self.assertIn(f"stage=bootstrap_complete rc={bootstrap_rc}", stderr)
+                self.assertIn("stage=keepalive_exec_attempt rc=0", stderr)
+                self.assertNotIn("stage=helper_exit", stderr)
+
+    def test_explicit_oneshot_exits_with_bootstrap_status(self) -> None:
+        for bootstrap_rc in (0, 29):
+            with self.subTest(bootstrap_rc=bootstrap_rc), tempfile.TemporaryDirectory() as directory:
+                fixture = StartFixture(Path(directory))
+                result = fixture.run(
+                    AGORA_IMAGE_START_ONESHOT="1", AGORA_TEST_BOOT_RC=str(bootstrap_rc),
+                )
+                self.assertEqual(result.returncode, bootstrap_rc)
+                self.assertEqual(fixture.status(), str(bootstrap_rc))
+                self.assertEqual(fixture.stages(result)[-2:], ["helper_exit", "start_sh_exit"])
+                self.assertNotIn("keepalive_exec_attempt", result.stderr)
 
 
 if __name__ == "__main__":
