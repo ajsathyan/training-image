@@ -50,7 +50,7 @@ class BootStartTests(unittest.TestCase):
             r"(?:.*\\\n)+?"
             r"\s+/opt/agora-venv/bin/python /opt/agora-image-runtime/agora_boot_start\.py \\\n"
             r"\s+9>&- \\\n\s+>/var/log/agora-image-bootstrap\.log 2>&1\n"
-            r"bootstrap_rc=\$\?\nset -e\ntrap start_failure ERR",
+            r"bootstrap_rc=\$\?\nset -e\ntrap 'start_failure \"\$\?\" \"\$LINENO\"' ERR",
         )
         self.assertLess(
             entrypoint.index('log_start_stage bootstrap_complete "$bootstrap_rc"'),

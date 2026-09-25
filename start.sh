@@ -12,14 +12,39 @@ unset HF_TOKEN AGORA_BOOT_HF_TOKEN AGORA_BOOT_LAUNCH_B64 \
 
 vast_start_log=/var/log/agora-vast-onstart.log
 log_start_stage() {
-    printf 'stage=%s rc=%s\n' "$1" "${2:-0}" >> "$vast_start_log"
+    # Only fixed image-owned names reach provider logs. Never print commands,
+    # launch arguments, environment values, or bootstrap output here.
+    case "$1" in
+        startup_entered|authorized_keys_unsafe|conflicting_public_keys|invalid_public_key|\
+        key_setup_ready|sshd_ready|cron_ready|environment_ready|\
+        bootstrap_lock_timeout|bootstrap_lock_acquired|bootstrap_started|\
+        bootstrap_complete|bootstrap_lock_released|helper_exit|\
+        pid1_keepalive_exec_attempt|start_sh_failed|start_sh_exit) ;;
+        *) return 64 ;;
+    esac
+    local stage="$1" stage_rc="${2:-0}" stage_line="${3:-${BASH_LINENO[0]}}"
+    # A closed provider stderr must not turn a successful startup into failure.
+    printf 'stage=%s rc=%s line=%s pid=%s ppid=%s\n' \
+        "$stage" "$stage_rc" "$stage_line" "$$" "$PPID" >&2 || :
+    printf 'stage=%s rc=%s line=%s pid=%s ppid=%s\n' \
+        "$stage" "$stage_rc" "$stage_line" "$$" "$PPID" \
+        2>/dev/null >> "$vast_start_log" || :
 }
 start_failure() {
-    rc=$?
-    log_start_stage start_sh_failed "$rc"
-    exit "$rc"
+    local failed_rc="$1" failed_line="$2"
+    trap - ERR EXIT
+    log_start_stage start_sh_failed "$failed_rc" "$failed_line" || :
+    exit "$failed_rc"
 }
-trap start_failure ERR
+start_exit() {
+    local exit_rc="$1" exit_line="$2"
+    trap - ERR EXIT
+    log_start_stage start_sh_exit "$exit_rc" "$exit_line" || :
+    exit "$exit_rc"
+}
+trap 'start_failure "$?" "$LINENO"' ERR
+trap 'start_exit "$?" "$LINENO"' EXIT
+log_start_stage startup_entered
 
 install -d -o root -g root -m 755 /run/sshd
 install -d -o root -g root -m 700 /root/.ssh
@@ -55,6 +80,7 @@ pgrep -x sshd >/dev/null 2>&1 || /usr/sbin/sshd
 log_start_stage sshd_ready
 
 pgrep -x cron >/dev/null 2>&1 || service cron start >/dev/null 2>&1 || cron
+log_start_stage cron_ready
 
 if ! grep -qF 'source /etc/rp_environment' /root/.bashrc; then
     [[ -f /etc/rp_environment ]] && printf '%s\n' 'source /etc/rp_environment' >> /root/.bashrc
@@ -77,14 +103,17 @@ mv -f "$agora_environment_next" /etc/agora_environment
 if ! grep -qF 'source /etc/agora_environment' /root/.bashrc; then
     printf '%s\n' 'source /etc/agora_environment' >> /root/.bashrc
 fi
+log_start_stage environment_ready
 
 exec 9>/run/agora-image-start.lock
 if ! flock -w 120 9; then
     log_start_stage bootstrap_lock_timeout 75
     exit 75
 fi
+log_start_stage bootstrap_lock_acquired
 
 rm -f /run/agora-image-bootstrap.status /run/agora-image-bootstrap.status.json
+log_start_stage bootstrap_started
 trap - ERR
 set +e
 env \
@@ -97,7 +126,7 @@ env \
     >/var/log/agora-image-bootstrap.log 2>&1
 bootstrap_rc=$?
 set -e
-trap start_failure ERR
+trap 'start_failure "$?" "$LINENO"' ERR
 printf '%s\n' "$bootstrap_rc" > /run/agora-image-bootstrap.status
 log_start_stage bootstrap_complete "$bootstrap_rc"
 
@@ -106,12 +135,13 @@ log_start_stage bootstrap_complete "$bootstrap_rc"
 # after the neutral PID1 attempt completes.
 flock -u 9
 exec 9>&-
+log_start_stage bootstrap_lock_released
 
 unset boot_autostart boot_launch_b64 boot_hf_token boot_metadata_wait_seconds configured_public_key
-trap - ERR
-
 if [[ "$image_start_oneshot" == "1" || "$$" -ne 1 ]]; then
+    log_start_stage helper_exit "$bootstrap_rc"
     exit "$bootstrap_rc"
 fi
 unset image_start_oneshot
+log_start_stage pid1_keepalive_exec_attempt
 exec sleep infinity
